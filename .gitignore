@@ -1,0 +1,22 @@
+# Datasets
+MobiAct_Dataset_v2.0/
+data/
+raw_data/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# Virtual Environments
+venv/
+.venv/
+env/
+.env/
+
+# IDEs
+.vscode/
+.idea/
