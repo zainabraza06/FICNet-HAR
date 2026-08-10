@@ -20,3 +20,9 @@ env/
 # IDEs
 .vscode/
 .idea/
+
+# Deep Learning / Model training outputs
+*.pt
+models/checkpoints/
+results/
+
