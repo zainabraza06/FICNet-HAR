@@ -281,3 +281,71 @@ def extract_stage2b_features(seg, n_bins: int = 5, max_samples: int = 1000):
         gyro.get('pitch_range', 0.0), gyro.get('roll_std', 0.0),
     ])
     return np.concatenate([profile, base_extra, gyro_vec, orient_vec])  # 35-dim
+
+
+# ============================================================
+# Stage 1: Neural-specific features (Binned and Flat)
+# ============================================================
+
+def build_binned_features(seg, n_bins=5, max_samples=1000):
+    """
+    Extract binned features for Stage 1 Deep Learning.
+    Returns array of shape [n_bins, 8].
+    """
+    seg = seg.iloc[:max_samples]
+    if len(seg) < n_bins:
+        return None
+    acc = seg[['acc_x', 'acc_y', 'acc_z']].values
+    gyro_vals = seg[['gyro_x', 'gyro_y', 'gyro_z']].values
+    bin_edges = np.linspace(0, len(acc), n_bins + 1).astype(int)
+    bins = []
+    for i in range(n_bins):
+        a = acc[bin_edges[i]:bin_edges[i+1]]
+        if len(a) == 0:
+            a = acc[max(0, bin_edges[i]-1):bin_edges[i]+1]
+        ae = (a**2).sum(axis=0)
+        ae = ae / (ae.sum() + 1e-8)
+        am = np.sqrt((a**2).sum(axis=1))
+        feat = list(ae) + [am.mean(), am.std()]
+        g = gyro_vals[bin_edges[i]:bin_edges[i+1]]
+        if len(g) == 0:
+            g = gyro_vals[max(0, bin_edges[i]-1):bin_edges[i]+1]
+        ge = (g**2).sum(axis=0)
+        ge = ge / (ge.sum() + 1e-8)
+        feat += list(ge)
+        bins.append(feat)
+    return np.array(bins, dtype=np.float32)
+
+
+def build_stage1_flat_features(seg, n_bins=5, max_samples=1000):
+    """
+    26-dim flat features: 15 (per-axis profile) + 5 (acc stats) + 6 (gyro stats).
+    """
+    seg_c = seg.iloc[:max_samples]
+    acc = seg_c[['acc_x', 'acc_y', 'acc_z']].values
+    if len(acc) < n_bins:
+        return None
+    bin_edges = np.linspace(0, len(acc), n_bins + 1).astype(int)
+    profile = []
+    for axis in range(3):
+        e = acc[:, axis]**2
+        ap = np.array([e[bin_edges[i]:bin_edges[i+1]].sum() for i in range(n_bins)])
+        profile.append(ap / (ap.sum() + 1e-8))
+    profile = np.concatenate(profile)  # 15
+
+    acc_mag = np.sqrt((acc**2).sum(axis=1))
+    gyro = seg_c[['gyro_x', 'gyro_y', 'gyro_z']].values
+    gyro_mag = np.sqrt((gyro**2).sum(axis=1))
+    ge = gyro**2
+    tge = ge.sum() + 1e-8
+    gx, gy, gz = ge[:, 0].sum() / tge, ge[:, 1].sum() / tge, ge[:, 2].sum() / tge
+    g_skew, g_kurt, g_mean = skew(gyro_mag), kurtosis(gyro_mag), gyro_mag.mean()
+    a_skew, a_kurt, a_var, a_mean = skew(acc_mag), kurtosis(acc_mag), acc_mag.var(), acc_mag.mean()
+    max_jerk = np.max(np.abs(np.gradient(acc_mag)))
+
+    flat = np.concatenate([
+        profile,
+        [a_skew, a_kurt, a_var, a_mean, max_jerk, gx, gy, gz, g_skew, g_kurt, g_mean]
+    ]).astype(np.float32)
+    return flat
+
