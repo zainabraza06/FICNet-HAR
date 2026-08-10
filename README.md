@@ -28,6 +28,19 @@ K-shot personalization calibration were all empirically tested and
 did not improve on the final pipeline — documented for transparency.
 
 ## Usage
+
+### Running Stage 1 Evaluation
+To run the full subject-independent Leave-One-Group-Out (LOSO) evaluation of all Stage 1 models (5 classical models, SimpleBiLSTM, DualBranchFusionNet, Residual Tree Correction, significance tests, feature-channel ablation, and probability averaging ensemble):
+```bash
+python run_stage1.py
+```
+
+To run a quick dry-run with a subset of subjects and training epochs to verify execution:
+```bash
+python run_stage1.py --fast
+```
+
+### Feature Engineering Pipeline Example
 ```python
 import numpy as np
 from src.data_loader import MobiActLoader
@@ -43,5 +56,7 @@ print("Accuracy:", results['accuracy'], "Balanced Accuracy:", results['balanced_
 ```
 
 ## Status
-Preprocessing and feature engineering: **finalized**.
-Next: neural architecture design informed by these feature findings.
+- Preprocessing and feature engineering: **finalized**.
+- Stage 1 evaluation and training pipelines: **completed and verified**.
+- Next: design and integrate Stage 2a/2b deep learning architectures.
+
