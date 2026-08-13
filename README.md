@@ -1,6 +1,6 @@
 # MobiAct Project
 
-This repository contains the codebase for evaluating various feature sets and models for Fall vs ADL (Activities of Daily Living) classification using the MobiAct Dataset v2.0.
+This repository contains the codebase for evaluating various feature sets and models for Fall vs ADL classification, Fall Subtypes, and ADL activities using the MobiAct Dataset v2.0.
 
 ## Project Structure
 
@@ -10,11 +10,13 @@ MobiAct_Project/
 │   └── MobiAct_Dataset_v2.0/    # Place the extracted dataset here
 ├── src/
 │   ├── data_loader.py           # Handles data loading and segmentation
-│   ├── features.py              # Feature extractors (binned, flat, cross-domain)
+│   ├── features.py              # Unified feature extractors (binned, flat, cross-domain, spectral)
 │   ├── models.py                # Deep learning and classical models
 │   └── evaluation.py            # LOSO validation and evaluation metrics
 ├── scripts/
-│   └── run_stage1_ablations.py  # Stage 1 binary classification script
+│   ├── run_stage1_ablations.py  # Stage 1: Binary Fall vs ADL
+│   ├── run_stage2a_ablations.py # Stage 2a: Fall Subtypes (4-class)
+│   └── run_stage2b_ablations.py # Stage 2b: ADL Classification (11-class)
 ├── configs/                     # Hyperparameters and paths
 ├── tests/                       # Unit/smoke tests
 ├── results/                     # Output directory for results and logs
@@ -42,8 +44,21 @@ pip install -r requirements.txt
 1. Download `MobiAct_Dataset_v2.0`.
 2. Extract the dataset and place the `MobiAct_Dataset_v2.0` folder inside the `data/` directory of this repository. The path `data/MobiAct_Dataset_v2.0/Annotated Data/` should exist.
 
-### 4. Run Stage 1 Ablations
+### 4. Running the Pipelines
+
+#### Stage 1: Binary Fall vs ADL
 ```bash
 python scripts/run_stage1_ablations.py
 ```
-This will run all feature and model ablations for Stage 1 (Binary Fall vs ADL) and save the results inside the `results/stage1_all_ablations/` folder.
+
+#### Stage 2a: Fall Subtypes (4-class)
+```bash
+python scripts/run_stage2a_ablations.py
+```
+
+#### Stage 2b: ADL Classification (11-class)
+```bash
+python scripts/run_stage2b_ablations.py
+```
+
+Results (JSON, CSV summaries) for each stage will be saved in their respective directories within the `results/` folder.
