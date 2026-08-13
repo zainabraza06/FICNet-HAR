@@ -79,9 +79,9 @@ def train_fusion(Xb_train, Xf_train, y_train_idx, n_classes, per_bin_dim, flat_d
         opt.step()
     return model
 
-def get_classical_models(seed):
+def get_classical_models(seed, priors=None):
     return {
-        'LDA': LinearDiscriminantAnalysis(),
+        'LDA': LinearDiscriminantAnalysis(priors=priors),
         'KNN-3': KNeighborsClassifier(n_neighbors=3, weights='distance'),
         'SVM-RBF': SVC(kernel='rbf', C=1.0, gamma='scale', probability=True, random_state=seed),
         'RandomForest': RandomForestClassifier(n_estimators=200, max_depth=8, random_state=seed),

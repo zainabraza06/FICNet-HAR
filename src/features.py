@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.stats import skew, kurtosis
-from scipy.signal import find_peaks, correlate
+from scipy.signal import find_peaks, correlate, welch
 
 def build_binned_features(acc_data, gyro_data=None, n_bins=5, include_gyro=False):
     if len(acc_data) < n_bins:
@@ -96,7 +96,8 @@ def extract_relative_position(acc_data):
 def build_flat_features(acc_data, gyro_data=None, pitch_data=None, roll_data=None, 
                         n_bins=5, include_gyro=False, include_orient=False,
                         include_attention=False, include_rpe=False, 
-                        include_fpn=False, include_kalman=False):
+                        include_fpn=False, include_kalman=False,
+                        include_spectral=False, include_fall_specific=False):
     if len(acc_data) < n_bins:
         return None
     
@@ -110,13 +111,56 @@ def build_flat_features(acc_data, gyro_data=None, pitch_data=None, roll_data=Non
         profile.append(ap / (ap.sum() + 1e-8))
     profile = np.concatenate(profile)
     
-    # Accelerometer stats (5-dim)
-    acc_mag = np.sqrt((acc_data**2).sum(axis=1))
-    a_skew, a_kurt, a_var, a_mean = skew(acc_mag), kurtosis(acc_mag), acc_mag.var(), acc_mag.mean()
-    max_jerk = np.max(np.abs(np.gradient(acc_mag)))
-    acc_stats = [a_skew, a_kurt, a_var, a_mean, max_jerk]
+    acc_mag_full = np.sqrt((acc_data**2).sum(axis=1))
+    a_skew, a_kurt, a_var, a_mean = skew(acc_mag_full), kurtosis(acc_mag_full), acc_mag_full.var(), acc_mag_full.mean()
+    max_jerk = np.max(np.abs(np.gradient(acc_mag_full)))
     
-    parts = [profile, acc_stats]
+    parts = [profile]
+    
+    # Base Accelerometer stats (varies slightly by stage)
+    if include_spectral:
+        # Stage 2b uses 4-dim base stats
+        base = np.array([a_var, a_mean, a_skew, a_kurt])
+        parts.append(base)
+        
+        # Spectral features (6-dim)
+        fs = 87.0
+        acmc = acc_mag_full - a_mean
+        freqs, psd = welch(acmc, fs=fs, nperseg=min(256, len(acmc)))
+        valid = freqs > 0.3
+        if valid.any():
+            dom_freq = freqs[valid][np.argmax(psd[valid])]
+            power_conc = psd[valid].max() / (psd[valid].sum() + 1e-8)
+        else:
+            dom_freq, power_conc = 0.0, 0.0
+        spectral = np.array([dom_freq, power_conc, a_var, a_mean, a_skew, a_kurt])
+        parts.append(spectral)
+    else:
+        # Stage 1 / 2a uses 5-dim base stats
+        acc_stats = [a_skew, a_kurt, a_var, a_mean, max_jerk]
+        parts.append(acc_stats)
+    
+    # Fall-specific features (10-dim) for Stage 2a
+    if include_fall_specific:
+        peak_idx = np.argmax(acc_mag_full)
+        peak_vec = acc_data[peak_idx] if peak_idx < len(acc_data) else np.zeros(3)
+        denom = np.abs(peak_vec).sum() + 1e-8
+        pax = np.abs(peak_vec) / denom
+        time_to_peak = peak_idx / len(acc_mag_full)
+        
+        peaks, _ = find_peaks(acc_mag_full, height=a_mean + np.std(acc_mag_full), distance=5)
+        n_secondary_peaks = len(peaks)
+        
+        settled = np.where(np.abs(acc_mag_full[peak_idx:] - 9.8) < 1.0)[0]
+        settle_time = (settled[0] / len(acc_mag_full)) if len(settled) > 0 else 1.0
+        
+        onset_len = min(20, len(acc_mag_full))
+        onset_window = acc_mag_full[:onset_len]
+        onset_slope = np.polyfit(np.arange(onset_len), onset_window, 1)[0] if len(onset_window) > 1 else 0.0
+        
+        fall_specific = [pax[0], pax[1], pax[2], n_secondary_peaks, max_jerk, 
+                         time_to_peak, settle_time, a_skew, a_kurt, onset_slope]
+        parts.append(fall_specific)
     
     # Gyroscope features (8-dim)
     if include_gyro and gyro_data is not None:
@@ -125,7 +169,7 @@ def build_flat_features(acc_data, gyro_data=None, pitch_data=None, roll_data=Non
         tge = ge.sum() + 1e-8
         gx, gy, gz = ge[:,0].sum()/tge, ge[:,1].sum()/tge, ge[:,2].sum()/tge
         g_skew, g_kurt, g_mean = skew(gyro_mag), kurtosis(gyro_mag), gyro_mag.mean()
-        ac = acc_mag - acc_mag.mean()
+        ac = acc_mag_full - a_mean
         acorr = correlate(ac, ac, mode='full')[len(ac)-1:]
         acorr = acorr / (acorr[0] + 1e-8)
         pk, _ = find_peaks(acorr[5:], height=0.2)
@@ -133,6 +177,18 @@ def build_flat_features(acc_data, gyro_data=None, pitch_data=None, roll_data=Non
         roll_range = roll_data.max() - roll_data.min() if roll_data is not None and len(roll_data) > 0 else 0.0
         gyro_vec = np.array([gx, gy, gz, g_skew, g_kurt, g_mean, roll_range, autocorr])
         parts.append(gyro_vec)
+    
+    # Orientation features (6-dim)
+    if include_orient and pitch_data is not None and roll_data is not None:
+        pitch_delta = pitch_data[-1] - pitch_data[0] if len(pitch_data) > 0 else 0.0
+        roll_delta = roll_data[-1] - roll_data[0] if len(roll_data) > 0 else 0.0
+        xz_corr = np.corrcoef(acc_data[:,0], acc_data[:,2])[0,1] if len(acc_data) > 10 else 0.0
+        xz_corr = xz_corr if not np.isnan(xz_corr) else 0.0
+        pitch_std = pitch_data.std() if len(pitch_data) > 0 else 0.0
+        pitch_range = pitch_data.max() - pitch_data.min() if len(pitch_data) > 0 else 0.0
+        roll_std = roll_data.std() if len(roll_data) > 0 else 0.0
+        orient = np.array([pitch_delta, roll_delta, xz_corr, pitch_std, pitch_range, roll_std])
+        parts.append(orient)
     
     # Cross-domain features
     if include_attention:

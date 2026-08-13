@@ -79,10 +79,10 @@ def run_loso_fusion(X_bins, X_flat, y, groups, epochs, seed, labels, device):
         all_true.extend(y_idx[te]); all_pred.extend(pred)
     return full_metrics([labels[i] for i in all_true], [labels[i] for i in all_pred], labels)
 
-def run_named_model(model_name, Xb, Xf, y, groups, labels, seed, device, epochs_bin=200):
+def run_named_model(model_name, Xb, Xf, y, groups, labels, seed, device, epochs=200, priors=None, lstm_hidden=8):
     if model_name in ['LDA', 'KNN-3', 'SVM-RBF', 'RandomForest']:
-        return run_loso_classical(Xf, y, groups, lambda n=model_name, s=seed: get_classical_models(s)[n], labels)
+        return run_loso_classical(Xf, y, groups, lambda n=model_name, s=seed: get_classical_models(s, priors=priors)[n], labels)
     elif model_name == 'BiLSTM':
-        return run_loso_dl(Xb, y, groups, epochs_bin, 8, seed, labels, device)
+        return run_loso_dl(Xb, y, groups, epochs, lstm_hidden, seed, labels, device)
     elif model_name == 'Fusion':
-        return run_loso_fusion(Xb, Xf, y, groups, epochs_bin, seed, labels, device)
+        return run_loso_fusion(Xb, Xf, y, groups, epochs, seed, labels, device)
