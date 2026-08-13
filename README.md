@@ -16,7 +16,8 @@ MobiAct_Project/
 ├── scripts/
 │   ├── run_stage1_ablations.py  # Stage 1: Binary Fall vs ADL
 │   ├── run_stage2a_ablations.py # Stage 2a: Fall Subtypes (4-class)
-│   └── run_stage2b_ablations.py # Stage 2b: ADL Classification (11-class)
+│   ├── run_stage2b_ablations.py # Stage 2b: ADL Classification (11-class)
+│   └── run_streaming_ablations.py # Streaming Evaluation (Windowing & Purity)
 ├── configs/                     # Hyperparameters and paths
 ├── tests/                       # Unit/smoke tests
 ├── results/                     # Output directory for results and logs
@@ -59,6 +60,11 @@ python scripts/run_stage2a_ablations.py
 #### Stage 2b: ADL Classification (11-class)
 ```bash
 python scripts/run_stage2b_ablations.py
+```
+
+#### Streaming Evaluation (Purity Stratification)
+```bash
+python scripts/run_streaming_ablations.py
 ```
 
 Results (JSON, CSV summaries) for each stage will be saved in their respective directories within the `results/` folder.
