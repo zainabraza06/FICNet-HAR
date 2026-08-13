@@ -14,10 +14,11 @@ MobiAct_Project/
 │   ├── models.py                # Deep learning and classical models
 │   └── evaluation.py            # LOSO validation and evaluation metrics
 ├── scripts/
-│   ├── run_stage1_ablations.py  # Stage 1: Binary Fall vs ADL
-│   ├── run_stage2a_ablations.py # Stage 2a: Fall Subtypes (4-class)
-│   ├── run_stage2b_ablations.py # Stage 2b: ADL Classification (11-class)
-│   └── run_streaming_ablations.py # Streaming Evaluation (Windowing & Purity)
+│   ├── run_stage1_ablations.py    # Stage 1: Binary Fall vs ADL
+│   ├── run_stage2a_ablations.py   # Stage 2a: Fall Subtypes (4-class)
+│   ├── run_stage2b_ablations.py   # Stage 2b: ADL Classification (11-class)
+│   ├── run_streaming_ablations.py # Streaming Evaluation (Windowing & Purity)
+│   └── run_hierarchical_ablations.py # End-to-End Hierarchical System
 ├── configs/                     # Hyperparameters and paths
 ├── tests/                       # Unit/smoke tests
 ├── results/                     # Output directory for results and logs
@@ -65,6 +66,11 @@ python scripts/run_stage2b_ablations.py
 #### Streaming Evaluation (Purity Stratification)
 ```bash
 python scripts/run_streaming_ablations.py
+```
+
+#### End-to-End Hierarchical System
+```bash
+python scripts/run_hierarchical_ablations.py
 ```
 
 Results (JSON, CSV summaries) for each stage will be saved in their respective directories within the `results/` folder.
