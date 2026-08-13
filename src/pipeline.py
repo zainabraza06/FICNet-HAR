@@ -79,3 +79,29 @@ def build_stage1_neural_dataset(loader, fall_codes, adl_codes, subjects, n_bins=
                 groups.append(subj)
     return np.array(X_bins), np.array(X_flat), np.array(y), np.array(groups)
 
+
+def build_stage2a_neural_dataset(loader, fall_codes, subjects, n_bins=5):
+    """
+    Build Stage 2a dataset (fall subtypes) for neural network evaluation.
+    Returns:
+        X_bins (np.ndarray): Binned temporal features of shape (N, n_bins, 8)
+        X_flat (np.ndarray): Flat statistical features of shape (N, 34)
+        y (np.ndarray): Labels (activity code e.g. 'BSC', 'FKL') of shape (N,)
+        groups (np.ndarray): Subject IDs of shape (N,)
+    """
+    X_bins, X_flat, y, groups = [], [], [], []
+    for code in fall_codes:
+        for subj in subjects:
+            seg = loader.get_segment(code, subj)
+            if seg is None:
+                continue
+            fb = build_binned_features(seg, n_bins)
+            fc = extract_stage2a_features(seg, n_bins)
+            if fb is not None and fc is not None:
+                X_bins.append(fb)
+                X_flat.append(fc)
+                y.append(code)
+                groups.append(subj)
+    return np.array(X_bins), np.array(X_flat), np.array(y), np.array(groups)
+
+

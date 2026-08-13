@@ -1,351 +1,147 @@
-"""
-Finalized feature extraction pipeline — three stages.
-
-Stage 1 (fall gate, binary):    5-bin |acc| energy profile
-Stage 2a (fall subtype, 4-cls): 34-dim (15 profile + 10 scalar + 9 gyro)
-Stage 2b (ADL, 11-cls):         35-dim (15 profile + 6 spectral/stat +
-                                          8 gyro + 6 orientation)
-
-All feature functions operate on a single labeled segment (a DataFrame
-already filtered to one activity code, via MobiActLoader.get_segment).
-
-Evidence trail (see project EDA log for full derivation):
-- Raw-waveform correlation: weak (falls 0.03-0.11, ADLs ~0.01) — REJECTED
-- Energy-distribution profile (n_bins=5): strong (falls 0.34-0.57,
-  ADLs near 0) — ACCEPTED as Stage 1 representation
-- Magnitude-only profile insufficient for fall SUBTYPE (correlation
-  0.94-0.99 between some pairs) — per-axis profile required for 2a
-- Gyroscope axis-fraction/moment features: consistently the strongest
-  discriminators for hard confusion pairs (BSC/SDL d=2.11, CHU/CSO
-  d=-2.97) — ACCEPTED, added to both 2a and 2b
-- Orientation canonicalization (world-frame rotation): REJECTED —
-  Android's magnetometer-derived azimuth is unreliable indoors
-- Body-metric conditioning (height/weight/BMI): REJECTED — no
-  significant correlation with fall-impact magnitude
-- Cross-modal jerk*gyro joint signal: REJECTED — underperforms
-  plain |acc| energy profile
-- Hierarchical hard-routing classification: REJECTED — routing
-  errors compound and underperform flat classification
-- K-shot personalization calibration: REJECTED — confusion pairs
-  are structural (physical similarity), not subject-specific
-"""
-
 import numpy as np
 from scipy.stats import skew, kurtosis
-from scipy.signal import find_peaks, correlate, welch
+from scipy.signal import find_peaks, correlate
 
-
-# ============================================================
-# Low-level signal utilities
-# ============================================================
-
-def _acc_magnitude(seg):
-    return np.sqrt(seg['acc_x'] ** 2 + seg['acc_y'] ** 2 + seg['acc_z'] ** 2)
-
-
-def _gyro_magnitude(seg):
-    return np.sqrt(seg['gyro_x'] ** 2 + seg['gyro_y'] ** 2 + seg['gyro_z'] ** 2)
-
-
-# ============================================================
-# Stage 1: Fall gate representation
-# ============================================================
-
-def energy_profile(seg, n_bins: int = 5, axis: str | None = None, max_samples: int | None = None):
-    """
-    Binned, normalized energy-distribution profile.
-
-    axis=None -> magnitude profile (n_bins,) — used for Stage 1 (fall gate)
-    axis='per_axis' -> per-axis profile (3*n_bins,) — used for Stage 2a/2b
-
-    max_samples caps the window (used for long ADL files like STD/WAL,
-    which run for minutes; a representative chunk is used instead of
-    the full file).
-    """
-    if max_samples is not None:
-        seg = seg.iloc[:max_samples]
-    if len(seg) < n_bins:
+def build_binned_features(acc_data, gyro_data=None, n_bins=5, include_gyro=False):
+    if len(acc_data) < n_bins:
         return None
-
-    acc = seg[['acc_x', 'acc_y', 'acc_z']].values
-    bin_edges = np.linspace(0, len(acc), n_bins + 1).astype(int)
-
-    if axis == 'per_axis':
-        profile = []
-        for a in range(3):
-            energy = acc[:, a] ** 2
-            binned = np.array([energy[bin_edges[i]:bin_edges[i + 1]].sum() for i in range(n_bins)])
-            total = binned.sum()
-            profile.append(binned / (total + 1e-8))
-        return np.concatenate(profile)  # (3*n_bins,)
-    else:
-        energy = (acc ** 2).sum(axis=1)
-        binned = np.array([energy[bin_edges[i]:bin_edges[i + 1]].sum() for i in range(n_bins)])
-        total = binned.sum()
-        return binned / (total + 1e-8)  # (n_bins,)
-
-
-# ============================================================
-# Stage 2a: Fall subtype scalar + gyro features
-# ============================================================
-
-def fall_subtype_scalar_features(seg) -> dict | None:
-    """10 scalar features validated for fall-type discrimination
-    (peak direction, sub-peak count, timing, jerk, distribution shape)."""
-    if len(seg) < 10:
-        return None
-
-    acc = seg[['acc_x', 'acc_y', 'acc_z']].values
-    gyro_mag = _gyro_magnitude(seg).values
-    acc_mag = _acc_magnitude(seg).values
-
-    feats = {}
-    peak_idx = int(np.argmax(acc_mag))
-    peak_vec = acc[peak_idx]
-    denom = np.abs(peak_vec).sum() + 1e-8
-    feats['peak_axis_x_frac'] = abs(peak_vec[0]) / denom
-    feats['peak_axis_y_frac'] = abs(peak_vec[1]) / denom
-    feats['peak_axis_z_frac'] = abs(peak_vec[2]) / denom
-    feats['time_to_peak_frac'] = peak_idx / len(acc_mag)
-
-    peaks, _ = find_peaks(acc_mag, height=acc_mag.mean() + acc_mag.std(), distance=5)
-    feats['n_subpeaks'] = len(peaks)
-
-    feats['acc_skew'] = skew(acc_mag)
-    feats['acc_kurtosis'] = kurtosis(acc_mag)
-
-    baseline = 9.8
-    settled = np.where(np.abs(acc_mag[peak_idx:] - baseline) < 1.0)[0]
-    feats['settle_time_frac'] = (settled[0] / len(acc_mag)) if len(settled) > 0 else 1.0
-
-    gyro_peak_idx = int(np.argmax(gyro_mag))
-    feats['gyro_acc_peak_offset'] = (gyro_peak_idx - peak_idx) / len(acc_mag)
-
-    jerk = np.gradient(acc_mag)
-    feats['max_jerk'] = np.max(np.abs(jerk))
-
-    return feats
-
-
-# ============================================================
-# Shared gyro / orientation feature block
-# (used by both Stage 2a and Stage 2b — this is the single
-# most consistently useful feature family found in EDA)
-# ============================================================
-
-def gyro_orientation_features(seg, max_samples: int | None = None) -> dict | None:
-    """
-    Gyroscope axis-fraction/moment features + orientation-delta
-    features. Validated as the strongest discriminator across every
-    hard confusion pair tested (fall subtypes, stairs up/down,
-    car-seat/chair-seat, sit/stand).
-    """
-    if max_samples is not None:
-        seg = seg.iloc[:max_samples]
-    if len(seg) < 20:
-        return None
-
-    acc = seg[['acc_x', 'acc_y', 'acc_z']].values
-    gyro = seg[['gyro_x', 'gyro_y', 'gyro_z']].values
-    acc_mag = np.sqrt((acc ** 2).sum(axis=1))
-    gyro_mag = np.sqrt((gyro ** 2).sum(axis=1))
-
-    feats = {}
-
-    gyro_energy = gyro ** 2
-    total = gyro_energy.sum() + 1e-8
-    feats['gyro_x_frac'] = gyro_energy[:, 0].sum() / total
-    feats['gyro_y_frac'] = gyro_energy[:, 1].sum() / total
-    feats['gyro_z_frac'] = gyro_energy[:, 2].sum() / total
-    feats['gyro_mean_mag'] = gyro_mag.mean()
-    feats['gyro_skew'] = skew(gyro_mag)
-    feats['gyro_kurtosis'] = kurtosis(gyro_mag)
-
-    if all(c in seg.columns for c in ['azimuth', 'pitch', 'roll']):
-        pitch = seg['pitch'].values
-        roll = seg['roll'].values
-        feats['pitch_net_delta'] = pitch[-1] - pitch[0]
-        feats['roll_net_delta'] = roll[-1] - roll[0]
-        feats['pitch_range'] = pitch.max() - pitch.min()
-        feats['roll_range'] = roll.max() - roll.min()
-        feats['pitch_std'] = pitch.std()
-        feats['roll_std'] = roll.std()
-
-    if len(acc) > 10:
-        cx = np.corrcoef(acc[:, 0], acc[:, 2])[0, 1]
-        feats['xz_corr'] = cx if not np.isnan(cx) else 0.0
-
-    ac_signal = acc_mag - acc_mag.mean()
-    autocorr = correlate(ac_signal, ac_signal, mode='full')[len(ac_signal) - 1:]
-    autocorr = autocorr / (autocorr[0] + 1e-8)
-    ac_peaks, _ = find_peaks(autocorr[5:], height=0.2)
-    feats['autocorr_peak_strength'] = autocorr[ac_peaks[0] + 5] if len(ac_peaks) > 0 else 0.0
-
-    return feats
-
-
-# ============================================================
-# Stage 2b: ADL spectral/statistical features
-# ============================================================
-
-def dominant_frequency_features(seg, fs: float = 87.0, max_samples: int = 2000) -> dict | None:
-    """FFT-based dominant frequency + spectral power concentration.
-    Effective for periodic ADLs (walking, jogging, stairs); weak for
-    short transitional activities (CSI/SCH/CHU) — retained regardless
-    since it contributes to the overall feature vector."""
-    seg = seg.iloc[:max_samples]
-    if len(seg) < 50:
-        return None
-    acc_mag = _acc_magnitude(seg).values
-    acc_mag = acc_mag - acc_mag.mean()
-
-    freqs, psd = welch(acc_mag, fs=fs, nperseg=min(256, len(acc_mag)))
-    valid = freqs > 0.3
-    if not valid.any():
-        return None
-    dom_freq = freqs[valid][np.argmax(psd[valid])]
-    power_concentration = psd[valid].max() / (psd[valid].sum() + 1e-8)
-    return {'dom_freq': dom_freq, 'power_concentration': power_concentration}
-
-
-# ============================================================
-# Assembled feature vectors — the FINAL, validated pipelines
-# ============================================================
-
-def extract_stage1_features(seg, n_bins: int = 5, max_samples: int | None = None):
-    """Fall gate (binary): 5-dim magnitude energy profile."""
-    return energy_profile(seg, n_bins=n_bins, axis=None, max_samples=max_samples)
-
-
-def extract_stage2a_features(seg, n_bins: int = 5):
-    """
-    Fall subtype (4-class): 34-dim.
-    15 (per-axis profile) + 10 (scalar) + 9 (gyro/orientation subset)
-    Validated LOSO accuracy: 0.816 (KNN-3, scaled)
-    """
-    profile = energy_profile(seg, n_bins=n_bins, axis='per_axis')
-    if profile is None:
-        return None
-    scalars = fall_subtype_scalar_features(seg)
-    if scalars is None:
-        return None
-    scalar_vec = np.array([
-        scalars['peak_axis_x_frac'], scalars['peak_axis_y_frac'], scalars['peak_axis_z_frac'],
-        scalars['n_subpeaks'], scalars['max_jerk'],
-        scalars['time_to_peak_frac'], scalars['settle_time_frac'],
-        scalars['acc_skew'], scalars['acc_kurtosis'],
-        scalars['gyro_acc_peak_offset'],
-    ])
-    gyro = gyro_orientation_features(seg)
-    if gyro is None:
-        return None
-    gyro_vec = np.array([
-        gyro['gyro_x_frac'], gyro['gyro_y_frac'], gyro['gyro_z_frac'],
-        gyro['gyro_skew'], gyro['gyro_kurtosis'], gyro['gyro_mean_mag'],
-        gyro.get('roll_std', 0.0), gyro.get('pitch_net_delta', 0.0), gyro.get('xz_corr', 0.0),
-    ])
-    return np.concatenate([profile, scalar_vec, gyro_vec])  # 34-dim
-
-
-def extract_stage2b_features(seg, n_bins: int = 5, max_samples: int = 1000):
-    """
-    ADL classification (9- or 11-class): 35-dim.
-    15 (profile) + 6 (spectral/stat) + 8 (gyro) + 6 (orientation)
-    Validated LOSO: 9-class 0.925 acc (LDA); 11-class 0.884 acc /
-    0.865 balanced acc (LDA, uniform priors)
-    """
-    profile = energy_profile(seg, n_bins=n_bins, axis='per_axis', max_samples=max_samples)
-    if profile is None:
-        return None
-    freq = dominant_frequency_features(seg)
-    if freq is None:
-        return None
-
-    acc_mag = _acc_magnitude(seg)
-    base_extra = np.array([
-        freq['dom_freq'], freq['power_concentration'],
-        acc_mag.var(), acc_mag.mean(), skew(acc_mag), kurtosis(acc_mag),
-    ])
-
-    gyro = gyro_orientation_features(seg)
-    if gyro is None:
-        return None
-    gyro_vec = np.array([
-        gyro['gyro_x_frac'], gyro['gyro_y_frac'], gyro['gyro_z_frac'],
-        gyro['gyro_skew'], gyro['gyro_kurtosis'], gyro['gyro_mean_mag'],
-        gyro.get('roll_range', 0.0), gyro.get('autocorr_peak_strength', 0.0),
-    ])
-    orient_vec = np.array([
-        gyro.get('pitch_net_delta', 0.0), gyro.get('roll_net_delta', 0.0),
-        gyro.get('xz_corr', 0.0), gyro.get('pitch_std', 0.0),
-        gyro.get('pitch_range', 0.0), gyro.get('roll_std', 0.0),
-    ])
-    return np.concatenate([profile, base_extra, gyro_vec, orient_vec])  # 35-dim
-
-
-# ============================================================
-# Stage 1: Neural-specific features (Binned and Flat)
-# ============================================================
-
-def build_binned_features(seg, n_bins=5, max_samples=1000):
-    """
-    Extract binned features for Stage 1 Deep Learning.
-    Returns array of shape [n_bins, 8].
-    """
-    seg = seg.iloc[:max_samples]
-    if len(seg) < n_bins:
-        return None
-    acc = seg[['acc_x', 'acc_y', 'acc_z']].values
-    gyro_vals = seg[['gyro_x', 'gyro_y', 'gyro_z']].values
-    bin_edges = np.linspace(0, len(acc), n_bins + 1).astype(int)
+    bin_edges = np.linspace(0, len(acc_data), n_bins+1).astype(int)
     bins = []
     for i in range(n_bins):
-        a = acc[bin_edges[i]:bin_edges[i+1]]
+        a = acc_data[bin_edges[i]:bin_edges[i+1]]
         if len(a) == 0:
-            a = acc[max(0, bin_edges[i]-1):bin_edges[i]+1]
+            a = acc_data[max(0, bin_edges[i]-1):bin_edges[i]+1]
         ae = (a**2).sum(axis=0)
         ae = ae / (ae.sum() + 1e-8)
         am = np.sqrt((a**2).sum(axis=1))
         feat = list(ae) + [am.mean(), am.std()]
-        g = gyro_vals[bin_edges[i]:bin_edges[i+1]]
-        if len(g) == 0:
-            g = gyro_vals[max(0, bin_edges[i]-1):bin_edges[i]+1]
-        ge = (g**2).sum(axis=0)
-        ge = ge / (ge.sum() + 1e-8)
-        feat += list(ge)
+        if include_gyro and gyro_data is not None:
+            g = gyro_data[bin_edges[i]:bin_edges[i+1]]
+            if len(g) == 0:
+                g = gyro_data[max(0, bin_edges[i]-1):bin_edges[i]+1]
+            ge = (g**2).sum(axis=0)
+            ge = ge / (ge.sum() + 1e-8)
+            feat += list(ge)
         bins.append(feat)
     return np.array(bins, dtype=np.float32)
 
+def extract_attention_entropy(acc_data, window_size=50):
+    acc_mag = np.sqrt((acc_data**2).sum(axis=1))
+    if len(acc_mag) < window_size:
+        return np.array([0.0, 0.0, 0.0])
+    n_segments = max(1, len(acc_mag) // window_size)
+    segments = np.array_split(acc_mag, n_segments)
+    segment_energies = np.array([np.sum(s**2) for s in segments])
+    segment_energies = segment_energies / (segment_energies.sum() + 1e-8)
+    attention_entropy = -np.sum(segment_energies * np.log(segment_energies + 1e-8))
+    attention_concentration = np.max(segment_energies)
+    attention_uniformity = 1 - (np.max(segment_energies) - np.min(segment_energies))
+    return np.array([attention_entropy, attention_concentration, attention_uniformity])
 
-def build_stage1_flat_features(seg, n_bins=5, max_samples=1000):
-    """
-    26-dim flat features: 15 (per-axis profile) + 5 (acc stats) + 6 (gyro stats).
-    """
-    seg_c = seg.iloc[:max_samples]
-    acc = seg_c[['acc_x', 'acc_y', 'acc_z']].values
-    if len(acc) < n_bins:
+def extract_multiscale_fpn(acc_data, scales=[1, 2, 4]):
+    acc_mag = np.sqrt((acc_data**2).sum(axis=1))
+    features = []
+    for scale in scales:
+        downsampled = acc_mag[::scale] if scale > 1 else acc_mag
+        features.extend([np.mean(downsampled), np.std(downsampled), np.max(downsampled),
+                         np.min(downsampled), skew(downsampled), kurtosis(downsampled),
+                         np.max(np.abs(np.gradient(downsampled)))])
+    for i in range(len(scales)-1):
+        ratio = np.mean(acc_mag[::scales[i]]) / (np.mean(acc_mag[::scales[i+1]]) + 1e-8)
+        features.append(ratio)
+    return np.array(features[:10])
+
+def extract_kalman_fusion(acc_data, gyro_data):
+    acc_mag = np.sqrt((acc_data**2).sum(axis=1))
+    gyro_mag = np.sqrt((gyro_data**2).sum(axis=1))
+    acc_noise = np.std(acc_mag)
+    gyro_noise = np.std(gyro_mag)
+    kalman_gain = acc_noise / (acc_noise + gyro_noise + 1e-8)
+    fused_mag = kalman_gain * acc_mag + (1 - kalman_gain) * gyro_mag
+    features = [np.mean(fused_mag), np.std(fused_mag), np.max(fused_mag),
+                np.min(fused_mag), np.median(fused_mag),
+                np.max(np.abs(np.gradient(fused_mag))), kalman_gain,
+                1 - kalman_gain, acc_noise / (gyro_noise + 1e-8),
+                np.corrcoef(acc_mag, gyro_mag)[0,1] if len(acc_mag) > 10 else 0.0]
+    return np.array(features[:10])
+
+def extract_relative_position(acc_data):
+    acc_mag = np.sqrt((acc_data**2).sum(axis=1))
+    n = len(acc_mag)
+    if n < 20:
+        return np.zeros(10)
+    features = []
+    for lag in [1, 5, 10, 20]:
+        if lag < n:
+            corr = np.corrcoef(acc_mag[:-lag], acc_mag[lag:])[0,1]
+            features.append(corr if not np.isnan(corr) else 0.0)
+    diffs = np.diff(acc_mag)
+    for step in [1, 5, 10]:
+        if len(diffs) > step:
+            rel_change = np.mean(np.abs(diffs[step:])) / (np.mean(np.abs(diffs[:step])) + 1e-8)
+            features.append(rel_change if not np.isnan(rel_change) else 0.0)
+    weights = np.arange(1, n+1) / n
+    weighted_mean = np.sum(weights * acc_mag) / (np.sum(weights) + 1e-8)
+    weighted_std = np.sqrt(np.sum(weights * (acc_mag - weighted_mean)**2) / (np.sum(weights) + 1e-8))
+    features.extend([weighted_mean, weighted_std])
+    threshold = np.percentile(acc_mag, 80)
+    high_activity_positions = np.where(acc_mag > threshold)[0]
+    if len(high_activity_positions) > 0:
+        pos_entropy = -np.sum((high_activity_positions / n) * np.log(high_activity_positions / n + 1e-8))
+        features.append(pos_entropy)
+    else:
+        features.append(0.0)
+    return np.array(features[:10])
+
+def build_flat_features(acc_data, gyro_data=None, pitch_data=None, roll_data=None, 
+                        n_bins=5, include_gyro=False, include_orient=False,
+                        include_attention=False, include_rpe=False, 
+                        include_fpn=False, include_kalman=False):
+    if len(acc_data) < n_bins:
         return None
-    bin_edges = np.linspace(0, len(acc), n_bins + 1).astype(int)
+    
+    bin_edges = np.linspace(0, len(acc_data), n_bins+1).astype(int)
+    
+    # Profile features (15-dim)
     profile = []
     for axis in range(3):
-        e = acc[:, axis]**2
+        e = acc_data[:, axis]**2
         ap = np.array([e[bin_edges[i]:bin_edges[i+1]].sum() for i in range(n_bins)])
         profile.append(ap / (ap.sum() + 1e-8))
-    profile = np.concatenate(profile)  # 15
-
-    acc_mag = np.sqrt((acc**2).sum(axis=1))
-    gyro = seg_c[['gyro_x', 'gyro_y', 'gyro_z']].values
-    gyro_mag = np.sqrt((gyro**2).sum(axis=1))
-    ge = gyro**2
-    tge = ge.sum() + 1e-8
-    gx, gy, gz = ge[:, 0].sum() / tge, ge[:, 1].sum() / tge, ge[:, 2].sum() / tge
-    g_skew, g_kurt, g_mean = skew(gyro_mag), kurtosis(gyro_mag), gyro_mag.mean()
+    profile = np.concatenate(profile)
+    
+    # Accelerometer stats (5-dim)
+    acc_mag = np.sqrt((acc_data**2).sum(axis=1))
     a_skew, a_kurt, a_var, a_mean = skew(acc_mag), kurtosis(acc_mag), acc_mag.var(), acc_mag.mean()
     max_jerk = np.max(np.abs(np.gradient(acc_mag)))
-
-    flat = np.concatenate([
-        profile,
-        [a_skew, a_kurt, a_var, a_mean, max_jerk, gx, gy, gz, g_skew, g_kurt, g_mean]
-    ]).astype(np.float32)
-    return flat
-
+    acc_stats = [a_skew, a_kurt, a_var, a_mean, max_jerk]
+    
+    parts = [profile, acc_stats]
+    
+    # Gyroscope features (8-dim)
+    if include_gyro and gyro_data is not None:
+        gyro_mag = np.sqrt((gyro_data**2).sum(axis=1))
+        ge = gyro_data**2
+        tge = ge.sum() + 1e-8
+        gx, gy, gz = ge[:,0].sum()/tge, ge[:,1].sum()/tge, ge[:,2].sum()/tge
+        g_skew, g_kurt, g_mean = skew(gyro_mag), kurtosis(gyro_mag), gyro_mag.mean()
+        ac = acc_mag - acc_mag.mean()
+        acorr = correlate(ac, ac, mode='full')[len(ac)-1:]
+        acorr = acorr / (acorr[0] + 1e-8)
+        pk, _ = find_peaks(acorr[5:], height=0.2)
+        autocorr = acorr[pk[0]+5] if len(pk) > 0 else 0.0
+        roll_range = roll_data.max() - roll_data.min() if roll_data is not None and len(roll_data) > 0 else 0.0
+        gyro_vec = np.array([gx, gy, gz, g_skew, g_kurt, g_mean, roll_range, autocorr])
+        parts.append(gyro_vec)
+    
+    # Cross-domain features
+    if include_attention:
+        parts.append(extract_attention_entropy(acc_data))
+    if include_rpe:
+        parts.append(extract_relative_position(acc_data))
+    if include_fpn:
+        parts.append(extract_multiscale_fpn(acc_data))
+    if include_kalman and gyro_data is not None:
+        parts.append(extract_kalman_fusion(acc_data, gyro_data))
+    
+    return np.concatenate([p for p in parts if len(p) > 0]).astype(np.float32)
