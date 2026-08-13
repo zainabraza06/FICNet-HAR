@@ -89,6 +89,51 @@ def run_named_model(model_name, Xb, Xf, y, groups, labels, seed, device, epochs=
         return run_loso_fusion(Xb, Xf, y, groups, epochs, seed, labels, device)
 
 # ============================================================
+# HIERARCHICAL EVALUATION HELPERS
+# ============================================================
+def run_loso_svm_with_proba(X, y, groups, seed):
+    logo = LeaveOneGroupOut()
+    all_true, all_pred, all_proba = [], [], []
+    for tr, te in logo.split(X, y, groups):
+        if len(set(y[tr])) < 2: continue
+        sc = StandardScaler().fit(X[tr])
+        Xtr, Xte = sc.transform(X[tr]), sc.transform(X[te])
+        clf = SVC(kernel='rbf', C=1.0, gamma='scale', probability=True, random_state=seed)
+        clf.fit(Xtr, y[tr])
+        pred = clf.predict(Xte)
+        proba = clf.predict_proba(Xte)
+        all_true.extend(y[te]); all_pred.extend(pred)
+        fall_idx = 1 if 'FALL' in clf.classes_ else 0
+        all_proba.extend([p[fall_idx] for p in proba])
+    return all_true, all_pred, all_proba
+
+def run_loso_rf(X, y, groups, seed):
+    logo = LeaveOneGroupOut()
+    all_true, all_pred = [], []
+    for tr, te in logo.split(X, y, groups):
+        if len(set(y[tr])) < 2: continue
+        sc = StandardScaler().fit(X[tr])
+        Xtr, Xte = sc.transform(X[tr]), sc.transform(X[te])
+        clf = RandomForestClassifier(n_estimators=200, max_depth=8, random_state=seed)
+        clf.fit(Xtr, y[tr])
+        pred = clf.predict(Xte)
+        all_true.extend(y[te]); all_pred.extend(pred)
+    return all_true, all_pred
+
+def get_stage2a_predictions(Xf, y, groups, seed):
+    logo = LeaveOneGroupOut()
+    all_true, all_pred = [], []
+    for tr, te in logo.split(Xf, y, groups):
+        if len(set(y[tr])) < 2: continue
+        sc = StandardScaler().fit(Xf[tr])
+        Xtr, Xte = sc.transform(Xf[tr]), sc.transform(Xf[te])
+        clf = SVC(kernel='rbf', C=1.0, gamma='scale', random_state=seed)
+        clf.fit(Xtr, y[tr])
+        pred = clf.predict(Xte)
+        all_true.extend(y[te]); all_pred.extend(pred)
+    return all_true, all_pred
+
+# ============================================================
 # STREAMING EVALUATION
 # ============================================================
 def compute_purity_metrics(y_true, y_pred, purity, thresh=0.9):

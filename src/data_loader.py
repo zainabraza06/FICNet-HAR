@@ -17,6 +17,80 @@ def get_segment(code, subj, trial=1):
     return seg if len(seg) > 0 else None
 
 # ============================================================
+# STATIC DATASET BUILDERS (For Hierarchical Evaluation)
+# ============================================================
+def build_stage1_dataset(all_codes, fall_codes):
+    from .features import build_binned_features, build_flat_features
+    X_bins, X_flat, y, groups = [], [], [], []
+    for code in all_codes:
+        for subj in range(1, 68):
+            seg = get_segment(code, subj)
+            if seg is None: continue
+            seg = seg.iloc[:1000]
+            acc = seg[['acc_x','acc_y','acc_z']].values
+            gyro = seg[['gyro_x','gyro_y','gyro_z']].values
+            pitch = seg['pitch'].values if 'pitch' in seg.columns else np.zeros(len(seg))
+            roll = seg['roll'].values if 'roll' in seg.columns else np.zeros(len(seg))
+            
+            fb = build_binned_features(acc, gyro, include_gyro=False)
+            fc = build_flat_features(acc, gyro, pitch, roll, 
+                                     include_gyro=False, include_orient=False,
+                                     include_spectral=False, include_attention=True,
+                                     include_rpe=True, include_fpn=False, include_kalman=False,
+                                     include_fall_specific=False)
+            if fb is not None and fc is not None:
+                X_bins.append(fb); X_flat.append(fc)
+                y.append('FALL' if code in fall_codes else 'ADL')
+                groups.append(subj)
+    return np.array(X_bins), np.array(X_flat), np.array(y), np.array(groups)
+
+def build_stage2a_dataset(fall_codes):
+    from .features import build_binned_features, build_flat_features
+    X_bins, X_flat, y, groups = [], [], [], []
+    for code in fall_codes:
+        for subj in range(1, 68):
+            seg = get_segment(code, subj)
+            if seg is None: continue
+            seg = seg.iloc[:1000]
+            acc = seg[['acc_x','acc_y','acc_z']].values
+            gyro = seg[['gyro_x','gyro_y','gyro_z']].values
+            pitch = seg['pitch'].values if 'pitch' in seg.columns else np.zeros(len(seg))
+            roll = seg['roll'].values if 'roll' in seg.columns else np.zeros(len(seg))
+            
+            fb = build_binned_features(acc, gyro, include_gyro=False)
+            fc = build_flat_features(acc, gyro, pitch, roll,
+                                     include_gyro=False, include_orient=False,
+                                     include_spectral=False, include_attention=True,
+                                     include_rpe=True, include_fpn=False, include_kalman=False,
+                                     include_fall_specific=True)
+            if fb is not None and fc is not None:
+                X_bins.append(fb); X_flat.append(fc); y.append(code); groups.append(subj)
+    return np.array(X_bins), np.array(X_flat), np.array(y), np.array(groups)
+
+def build_stage2b_dataset(adl_codes):
+    from .features import build_binned_features, build_flat_features
+    X_bins, X_flat, y, groups = [], [], [], []
+    for code in adl_codes:
+        for subj in range(1, 68):
+            seg = get_segment(code, subj)
+            if seg is None: continue
+            seg = seg.iloc[:1000]
+            acc = seg[['acc_x','acc_y','acc_z']].values
+            gyro = seg[['gyro_x','gyro_y','gyro_z']].values
+            pitch = seg['pitch'].values if 'pitch' in seg.columns else np.zeros(len(seg))
+            roll = seg['roll'].values if 'roll' in seg.columns else np.zeros(len(seg))
+            
+            fb = build_binned_features(acc, gyro, include_gyro=True)
+            fc = build_flat_features(acc, gyro, pitch, roll,
+                                     include_gyro=True, include_orient=False,
+                                     include_spectral=True, include_attention=True,
+                                     include_rpe=True, include_fpn=False, include_kalman=False,
+                                     include_fall_specific=False)
+            if fb is not None and fc is not None:
+                X_bins.append(fb); X_flat.append(fc); y.append(code); groups.append(subj)
+    return np.array(X_bins), np.array(X_flat), np.array(y), np.array(groups)
+
+# ============================================================
 # STREAMING DATASET BUILDER
 # ============================================================
 def build_subject_stream(codes, subject, max_per_activity=1000,
