@@ -74,16 +74,16 @@ def run_loso_fusion(Xb, Xf, y, groups, epochs, seed, labels):
         all_pred.extend(pred)
     return full_metrics([labels[i] for i in all_true], [labels[i] for i in all_pred], labels)
 
-def run_on_model(model_name, Xb, Xf, y, g, labels, epochs=200, hidden=8):
+def run_on_model(model_name, Xb, Xf, y, g, labels, epochs=200, hidden=8, stage='s1'):
     if model_name in CLASSICAL_MODELS:
-        return [run_loso_classical(Xf, y, g, lambda n=model_name, s=seed: get_classical_models(s)[n], labels)
+        return [run_loso_classical(Xf, y, g, lambda n=model_name, s=seed: get_classical_models(s, stage)[n], labels)
                 for seed in SEEDS]
     elif model_name == 'BiLSTM':
         return [run_loso_dl(Xb, y, g, epochs, hidden, seed, labels) for seed in SEEDS]
     else:
         return [run_loso_fusion(Xb, Xf, y, g, epochs, seed, labels) for seed in SEEDS]
 
-def get_loso_predictions(model_name, Xb, Xf, y, g, labels, seed=0, epochs=200, hidden=8):
+def get_loso_predictions(model_name, Xb, Xf, y, g, labels, seed=0, epochs=200, hidden=8, stage='s1'):
     l2i = {l:i for i,l in enumerate(labels)}
     logo = LeaveOneGroupOut()
     all_true, all_pred = [], []
@@ -92,7 +92,7 @@ def get_loso_predictions(model_name, Xb, Xf, y, g, labels, seed=0, epochs=200, h
             if len(set(y[tr])) < 2: continue
             sc = StandardScaler().fit(Xf[tr])
             Xtr, Xte = sc.transform(Xf[tr]), sc.transform(Xf[te])
-            clf = get_classical_models(seed)[model_name]
+            clf = get_classical_models(seed, stage)[model_name]
             clf.fit(Xtr, y[tr])
             pred = clf.predict(Xte)
             all_true.extend(y[te])

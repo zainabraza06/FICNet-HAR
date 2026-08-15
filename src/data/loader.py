@@ -30,3 +30,20 @@ def build_dataset_stage1(groups, n_bins=5):
                 y.append('FALL' if code in FALL_CODES else 'ADL')
                 g_out.append(subj)
     return np.array(Xb), np.array(Xf), np.array(y), np.array(g_out)
+
+def build_dataset_stage2a(groups, n_bins=5):
+    Xb, Xf, y, g_out = [], [], [], []
+    for code in FALL_CODES:
+        for subj in range(1, 68):
+            seg = get_segment(code, subj)
+            if seg is None: continue
+            seg = seg.iloc[:1000]
+            acc = seg[['acc_x','acc_y','acc_z']].values
+            fb = build_binned_features(acc, n_bins)
+            fc = build_flat_features(acc, groups, stage='s2a')
+            if fb is not None and fc is not None:
+                Xb.append(fb)
+                Xf.append(fc)
+                y.append(code)
+                g_out.append(subj)
+    return np.array(Xb), np.array(Xf), np.array(y), np.array(g_out)
