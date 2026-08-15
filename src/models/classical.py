@@ -4,7 +4,12 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 
 def get_classical_models(seed, stage='s1'):
-    priors = np.ones(4)/4 if stage == 's2a' else None
+    if stage == 's2a':
+        priors = np.ones(4)/4
+    elif stage == 's2b':
+        priors = np.ones(11)/11
+    else:
+        priors = None
     lda = LinearDiscriminantAnalysis(priors=priors) if priors is not None else LinearDiscriminantAnalysis()
     
     return {

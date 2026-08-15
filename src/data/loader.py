@@ -22,8 +22,8 @@ def build_dataset_stage1(groups, n_bins=5):
             if seg is None: continue
             seg = seg.iloc[:1000]
             acc = seg[['acc_x','acc_y','acc_z']].values
-            fb = build_binned_features(acc, n_bins)
-            fc = build_flat_features(acc, groups)
+            fb = build_binned_features(acc, n_bins=n_bins)
+            fc = build_flat_features(acc, groups=groups, stage='s1')
             if fb is not None and fc is not None:
                 Xb.append(fb)
                 Xf.append(fc)
@@ -39,11 +39,30 @@ def build_dataset_stage2a(groups, n_bins=5):
             if seg is None: continue
             seg = seg.iloc[:1000]
             acc = seg[['acc_x','acc_y','acc_z']].values
-            fb = build_binned_features(acc, n_bins)
-            fc = build_flat_features(acc, groups, stage='s2a')
+            fb = build_binned_features(acc, n_bins=n_bins)
+            fc = build_flat_features(acc, groups=groups, stage='s2a')
             if fb is not None and fc is not None:
                 Xb.append(fb)
                 Xf.append(fc)
                 y.append(code)
                 g_out.append(subj)
+    return np.array(Xb), np.array(Xf), np.array(y), np.array(g_out)
+
+def build_dataset_stage2b(groups, n_bins=5):
+    include_gyro_bins = 'gyro' in groups
+    Xb, Xf, y, g_out = [], [], [], []
+    from src.config import ADL_CODES_11
+    for code in ADL_CODES_11:
+        for subj in range(1, 68):
+            seg = get_segment(code, subj)
+            if seg is None: continue
+            seg = seg.iloc[:1000]
+            acc = seg[['acc_x','acc_y','acc_z']].values
+            gyro = seg[['gyro_x','gyro_y','gyro_z']].values if 'gyro_x' in seg.columns else None
+            roll = seg['roll'].values if 'roll' in seg.columns else np.zeros(len(seg))
+            
+            fb = build_binned_features(acc, gyro_data=gyro, n_bins=n_bins, include_gyro=include_gyro_bins)
+            fc = build_flat_features(acc, gyro_data=gyro, roll_data=roll, groups=groups, stage='s2b')
+            if fb is not None and fc is not None:
+                Xb.append(fb); Xf.append(fc); y.append(code); g_out.append(subj)
     return np.array(Xb), np.array(Xf), np.array(y), np.array(g_out)

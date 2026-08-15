@@ -8,13 +8,13 @@ from src.config import RESULTS_DIR, RESULTS_DIR_S2A, LABELS_S1, LABELS_S2A, CLAS
 from src.models.classical import get_classical_models
 
 def plot_confusion_matrix(cm, best_model, feature_set_name, stage='s1'):
-    labels = LABELS_S1 if stage == 's1' else LABELS_S2A
-    res_dir = RESULTS_DIR if stage == 's1' else RESULTS_DIR_S2A
-    stage_name = 'Stage 1' if stage == 's1' else 'Stage 2a'
+    if stage == 's1': labels, res_dir, stage_name = LABELS_S1, RESULTS_DIR, 'Stage 1'
+    elif stage == 's2a': labels, res_dir, stage_name = LABELS_S2A, RESULTS_DIR_S2A, 'Stage 2a'
+    else: labels, res_dir, stage_name = LABELS_S2B, RESULTS_DIR_S2B, 'Stage 2b'
     
-    fig, ax = plt.subplots(figsize=(6, 5) if stage == 's1' else (7, 6))
+    fig, ax = plt.subplots(figsize=(6, 5) if stage == 's1' else (7, 6) if stage == 's2a' else (12, 10))
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=labels, yticklabels=labels,
-                ax=ax, cbar=False, linewidths=0.5, linecolor='white')
+                ax=ax, cbar=False, linewidths=0.5, linecolor='white', annot_kws={'size': 8} if stage == 's2b' else None)
     ax.set_xlabel('Predicted')
     ax.set_ylabel('True')
     ax.set_title(f'{stage_name} Confusion Matrix — {best_model} ({feature_set_name})')
@@ -24,9 +24,9 @@ def plot_confusion_matrix(cm, best_model, feature_set_name, stage='s1'):
     print(f"  Saved: {res_dir}/{stage_name.lower().replace(' ', '')}_confusion_matrix.png")
 
 def plot_feature_distributions(best_model, Xf, y, feature_names, stage='s1'):
-    labels = LABELS_S1 if stage == 's1' else LABELS_S2A
-    res_dir = RESULTS_DIR if stage == 's1' else RESULTS_DIR_S2A
-    stage_name = 'Stage 1' if stage == 's1' else 'Stage 2a'
+    if stage == 's1': labels, res_dir, stage_name = LABELS_S1, RESULTS_DIR, 'Stage 1'
+    elif stage == 's2a': labels, res_dir, stage_name = LABELS_S2A, RESULTS_DIR_S2A, 'Stage 2a'
+    else: labels, res_dir, stage_name = LABELS_S2B, RESULTS_DIR_S2B, 'Stage 2b'
 
     if best_model not in CLASSICAL_MODELS:
         print(f"  Best model is {best_model} — skipping permutation-importance plot")
@@ -64,8 +64,9 @@ def plot_feature_distributions(best_model, Xf, y, feature_names, stage='s1'):
     print(f"  Saved: {res_dir}/{stage_name.lower().replace(' ', '')}_feature_distributions.png")
 
 def plot_energy_profiles(Xb, y, stage='s1'):
-    res_dir = RESULTS_DIR if stage == 's1' else RESULTS_DIR_S2A
-    stage_name = 'Stage 1' if stage == 's1' else 'Stage 2a'
+    if stage == 's1': res_dir, stage_name = RESULTS_DIR, 'Stage 1'
+    elif stage == 's2a': res_dir, stage_name = RESULTS_DIR_S2A, 'Stage 2a'
+    else: res_dir, stage_name = RESULTS_DIR_S2B, 'Stage 2b'
 
     if stage == 's2a':
         labels = LABELS_S2A
@@ -84,6 +85,27 @@ def plot_energy_profiles(Xb, y, stage='s1'):
         plt.savefig(f'{res_dir}/stage2a_energy_profiles.png', dpi=300, bbox_inches='tight')
         plt.close()
         print(f"  Saved: {res_dir}/stage2a_energy_profiles.png")
+        return
+
+    if stage == 's2b':
+        selected_adls = ['WAL', 'JOG', 'SIT', 'STD']
+        Xb_by_adl = {label: np.mean(Xb[y==label, :, :3], axis=0) for label in selected_adls if (y==label).sum() > 0}
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        axes = axes.flatten()
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
+        for label, ax in zip(selected_adls, axes):
+            if label in Xb_by_adl:
+                data = Xb_by_adl[label]
+                for axis in range(3):
+                    ax.plot(range(5), data[:, axis], 'o-', label=f'Axis {["X","Y","Z"][axis]}', color=colors[axis], linewidth=2, markersize=8)
+                ax.set_xlabel('Time Bin'); ax.set_ylabel('Normalized Energy')
+                ax.set_title(label); ax.legend(); ax.grid(True, alpha=0.3)
+                ax.set_xticks(range(5)); ax.set_xticklabels([f'B{i+1}' for i in range(5)])
+        plt.suptitle('Energy Profiles by ADL Type')
+        plt.tight_layout()
+        plt.savefig(f'{res_dir}/stage2b_energy_profiles.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"  Saved: {res_dir}/stage2b_energy_profiles.png")
         return
 
     Xb_fall = Xb[y == 'FALL']
@@ -114,7 +136,7 @@ def plot_energy_profiles(Xb, y, stage='s1'):
     print(f"  Saved: {res_dir}/{stage_name.lower().replace(' ', '')}_energy_profiles.png")
 
 def plot_binned_boxplots(Xb, y, stage='s1'):
-    if stage == 's2a': return
+    if stage in ['s2a', 's2b']: return
     
     res_dir = RESULTS_DIR if stage == 's1' else RESULTS_DIR_S2A
     stage_name = 'Stage 1' if stage == 's1' else 'Stage 2a'

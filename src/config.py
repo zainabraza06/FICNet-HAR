@@ -10,10 +10,12 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_ROOT = os.path.join(PROJECT_ROOT, 'data', 'Annotated Data')
 RESULTS_DIR = os.path.join(PROJECT_ROOT, 'results', 'stage1_complete')
 RESULTS_DIR_S2A = os.path.join(PROJECT_ROOT, 'results', 'stage2a_complete')
+RESULTS_DIR_S2B = os.path.join(PROJECT_ROOT, 'results', 'stage2b_complete')
 
 # Ensure results directory exists
 os.makedirs(RESULTS_DIR, exist_ok=True)
 os.makedirs(RESULTS_DIR_S2A, exist_ok=True)
+os.makedirs(RESULTS_DIR_S2B, exist_ok=True)
 
 # Code and Classes
 FALL_CODES = ['BSC', 'FKL', 'FOL', 'SDL']
@@ -21,6 +23,7 @@ ADL_CODES_11 = ['STD', 'WAL', 'JOG', 'JUM', 'STU', 'STN', 'SCH', 'SIT', 'CHU', '
 ALL_CODES = FALL_CODES + ADL_CODES_11
 LABELS_S1 = ['ADL', 'FALL']
 LABELS_S2A = sorted(FALL_CODES)
+LABELS_S2B = sorted(ADL_CODES_11)
 
 # Model and Feature Settings
 SEEDS = [0, 1, 2, 3, 4]
