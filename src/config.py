@@ -12,12 +12,14 @@ RESULTS_DIR = os.path.join(PROJECT_ROOT, 'results', 'stage1_complete')
 RESULTS_DIR_S2A = os.path.join(PROJECT_ROOT, 'results', 'stage2a_complete')
 RESULTS_DIR_S2B = os.path.join(PROJECT_ROOT, 'results', 'stage2b_complete')
 RESULTS_DIR_HIERARCHICAL = os.path.join(PROJECT_ROOT, 'results', 'hierarchical_complete')
+RESULTS_DIR_STREAMING = os.path.join(PROJECT_ROOT, 'results', 'streaming_complete')
 
 # Ensure results directory exists
 os.makedirs(RESULTS_DIR, exist_ok=True)
 os.makedirs(RESULTS_DIR_S2A, exist_ok=True)
 os.makedirs(RESULTS_DIR_S2B, exist_ok=True)
 os.makedirs(RESULTS_DIR_HIERARCHICAL, exist_ok=True)
+os.makedirs(RESULTS_DIR_STREAMING, exist_ok=True)
 
 # Code and Classes
 FALL_CODES = ['BSC', 'FKL', 'FOL', 'SDL']
