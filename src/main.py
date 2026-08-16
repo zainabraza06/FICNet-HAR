@@ -1,209 +1,207 @@
-import json
+import os, json, pickle, time
 import numpy as np
 import pandas as pd
-from scipy import stats
-from sklearn.metrics import classification_report, confusion_matrix
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import confusion_matrix, classification_report
 from sklearn.preprocessing import StandardScaler
+from sklearn.inspection import permutation_importance
 
-from src.config import MODELS, CORE_GROUPS, CANDIDATE_GROUPS, LABELS_S1, ALPHA, RESULTS_DIR, CLASSICAL_MODELS
-from src.data.loader import build_dataset_stage1
-from src.features.extractors import feature_names_for
-from src.training.evaluate import run_on_model, get_loso_predictions
+from src.config import RESULTS_DIR, LABELS_S1, ALL_CODES, FALL_CODES, CLASSICAL_MODELS
+from src.features.extractors import REGISTRY_S1, build_binned_features, build_flat_features, feature_names_for
+from src.data.loader import get_segment
+from src.training.evaluate import run_stage_pipeline, get_loso_predictions
 from src.models.classical import get_classical_models
 from src.models.deep import train_bilstm, train_fusion
-from src.utils.viz import plot_confusion_matrix, plot_feature_distributions, plot_energy_profiles, plot_binned_boxplots
-from src.utils.edge import measure_inference_time_classical, measure_inference_time_bilstm, measure_inference_time_fusion, measure_model_size
-import warnings
+from src.config import DEVICE
 
-warnings.filterwarnings('ignore')
+def build_dataset_stage1(groups):
+    Xb, Xf, y, g = [], [], [], []
+    for code in ALL_CODES:
+        for subj in range(1, 68):
+            seg = get_segment(code, subj)
+            if seg is None:
+                continue
+            seg = seg.iloc[:1000]
+            acc = seg[['acc_x', 'acc_y', 'acc_z']].values
+            fb = build_binned_features(acc, n_bins=5, include_gyro=False)
+            fc = build_flat_features(acc, None, None, groups, REGISTRY_S1)
+            if fb is not None and fc is not None:
+                Xb.append(fb)
+                Xf.append(fc)
+                y.append('FALL' if code in FALL_CODES else 'ADL')
+                g.append(subj)
+    return np.array(Xb), np.array(Xf), np.array(y), np.array(g)
 
-def print_seeds(name, metrics):
-    accs=[m['accuracy'] for m in metrics]
-    bals=[m['balanced_accuracy'] for m in metrics]
-    f1s=[m['macro_f1'] for m in metrics]
-    print(f"    {name}: acc={np.mean(accs):.4f}±{np.std(accs):.4f} bal={np.mean(bals):.4f}±{np.std(bals):.4f} f1={np.mean(f1s):.4f}±{np.std(f1s):.4f}")
-
-def pick_best_model(model_results):
-    return max(model_results, key=lambda m: np.mean([x['accuracy'] for x in model_results[m]]))
+def run_rpe_diagnostic():
+    from src.features.extractors import feat_rpe
+    print("\n" + "=" * 70)
+    print("RPE DIAGNOSTIC (post-fix)")
+    print("=" * 70)
+    codes = ALL_CODES[:3]
+    sample_segs = []
+    for code in codes:
+        for subj in range(1, 15 + 1):
+            seg = get_segment(code, subj)
+            if seg is None:
+                continue
+            acc = seg[['acc_x', 'acc_y', 'acc_z']].values[:1000]
+            if len(acc) < 20:
+                continue
+            sample_segs.append(feat_rpe(acc))
+    if not sample_segs:
+        print("  No segments available for diagnostic sample — skipping.")
+        return
+    rpe_block = np.array(sample_segs)
+    n_nan, n_inf = np.isnan(rpe_block).sum(), np.isinf(rpe_block).sum()
+    max_val = np.nanmax(np.abs(rpe_block))
+    print(f"  Sample size: {len(sample_segs)} segments")
+    print(f"  NaN: {n_nan}  Inf: {n_inf}  Max |value|: {max_val:.4f}  (clip ceiling = 100.0)")
+    if n_nan == 0 and n_inf == 0 and max_val <= 100.0:
+        print("  OK: fixed feat_rpe() is bounded as expected. Proceeding.")
+    else:
+        print("  WARNING: unexpected values still present — investigate before proceeding.")
 
 def main():
-    print("\n"+"="*70); print(f"PART 1: MODEL SELECTION on core set {CORE_GROUPS}"); print("="*70)
+    print("\n" + "#" * 70)
+    print("# STAGE 1")
+    print("#" * 70)
 
-    Xb_core, Xf_core, y_core, g_core = build_dataset_stage1(CORE_GROUPS)
-    print(f"Dataset: {Xb_core.shape}, {Xf_core.shape}, classes: {sorted(set(y_core))}")
+    run_rpe_diagnostic()
 
-    model_results_core = {}
-    for model in MODELS:
-        print(f"\n  {model}:")
-        metrics = run_on_model(model, Xb_core, Xf_core, y_core, g_core, LABELS_S1)
-        print_seeds(model, metrics)
-        model_results_core[model] = metrics
+    result = run_stage_pipeline("STAGE 1", build_dataset_stage1, REGISTRY_S1, LABELS_S1,
+                                 epochs_selection=200, bilstm_hidden=8)
 
-    model_stage1 = pick_best_model(model_results_core)
-    print(f"\n  >>> Model selected on core set: {model_stage1}")
+    best_model = result['final_model']
+    Xb, Xf, y, g = result['Xb'], result['Xf'], result['y'], result['g']
+    feature_names = feature_names_for(result['final_groups'], REGISTRY_S1)
 
-
-    print("\n"+"="*70); print(f"PART 2: GREEDY FORWARD FEATURE SELECTION on {model_stage1}"); print("="*70)
-
-    current_groups = list(CORE_GROUPS)
-    remaining_candidates = list(CANDIDATE_GROUPS)
-
-    Xb_cur, Xf_cur, y_cur, g_cur = build_dataset_stage1(current_groups)
-    current_metrics = run_on_model(model_stage1, Xb_cur, Xf_cur, y_cur, g_cur, LABELS_S1)
-    print_seeds(f"round 0: {current_groups}", current_metrics)
-
-    selection_log = [{'groups': list(current_groups),
-                       'mean_acc': float(np.mean([m['accuracy'] for m in current_metrics])),
-                       'accepted': True, 'reason': 'core (always included)'}]
-
-    round_num = 1
-    while remaining_candidates:
-        print(f"\n  -- Round {round_num}: current set = {current_groups}, candidates = {remaining_candidates} --")
-        candidate_results = {}
-        for cand in remaining_candidates:
-            trial_groups = current_groups + [cand]
-            Xb_t, Xf_t, y_t, g_t = build_dataset_stage1(trial_groups)
-            trial_metrics = run_on_model(model_stage1, Xb_t, Xf_t, y_t, g_t, LABELS_S1)
-            accs_trial = [m['accuracy'] for m in trial_metrics]
-            accs_cur = [m['accuracy'] for m in current_metrics]
-            t_stat, p = stats.ttest_rel(accs_trial, accs_cur)
-            gain = np.mean(accs_trial) - np.mean(accs_cur)
-            print_seeds(f"+{cand} -> {trial_groups}", trial_metrics)
-            print(f"      gain={gain:+.4f}, paired t-test p={p:.4f} {'(SIG)' if p < ALPHA else '(n.s.)'}")
-            candidate_results[cand] = {'groups': trial_groups, 'metrics': trial_metrics, 'gain': gain, 'p': p}
-
-        eligible = {c: r for c, r in candidate_results.items() if r['gain'] > 0 and r['p'] < ALPHA}
-        if not eligible:
-            print(f"\n  No remaining candidate gives a significant positive improvement — stopping.")
-            for c, r in candidate_results.items():
-                selection_log.append({'groups': r['groups'], 'mean_acc': float(np.mean([m['accuracy'] for m in r['metrics']])),
-                                       'accepted': False, 'reason': f"gain={r['gain']:+.4f}, p={r['p']:.4f} — rejected"})
-            break
-
-        winner = max(eligible, key=lambda c: eligible[c]['gain'])
-        print(f"\n  >>> ACCEPTED: '{winner}' (gain={eligible[winner]['gain']:+.4f}, p={eligible[winner]['p']:.4f})")
-        for c, r in candidate_results.items():
-            if c == winner:
-                selection_log.append({'groups': r['groups'], 'mean_acc': float(np.mean([m['accuracy'] for m in r['metrics']])),
-                                       'accepted': True, 'reason': f"gain={r['gain']:+.4f}, p={r['p']:.4f}"})
-            else:
-                selection_log.append({'groups': r['groups'], 'mean_acc': float(np.mean([m['accuracy'] for m in r['metrics']])),
-                                       'accepted': False, 'reason': f"gain={r['gain']:+.4f}, p={r['p']:.4f} — beaten by '{winner}'"})
-
-        current_groups = candidate_results[winner]['groups']
-        current_metrics = candidate_results[winner]['metrics']
-        remaining_candidates.remove(winner)
-        round_num += 1
-
-    FINAL_GROUPS_S1 = current_groups
-    print(f"\n  >>> FINAL FEATURE SET (Stage 1, model={model_stage1}): {FINAL_GROUPS_S1}")
-
-    Xb_final, Xf_final, y_final, g_final = build_dataset_stage1(FINAL_GROUPS_S1)
-    FINAL_FEATURE_NAMES = feature_names_for(FINAL_GROUPS_S1)
-
-
-    print("\n"+"="*70); print(f"PART 2b: RE-VERIFY MODEL on final feature set {FINAL_GROUPS_S1}"); print("="*70)
-
-    model_results_final = {model_stage1: current_metrics} 
-    for model in MODELS:
-        if model == model_stage1: continue
-        print(f"\n  {model}:")
-        metrics = run_on_model(model, Xb_final, Xf_final, y_final, g_final, LABELS_S1)
-        print_seeds(model, metrics)
-        model_results_final[model] = metrics
-
-    best_model = pick_best_model(model_results_final)
-    if best_model != model_stage1:
-        print(f"\n  >>> Model ranking CHANGED with final feature set: {model_stage1} -> {best_model}")
-    else:
-        print(f"\n  >>> Model choice confirmed: {best_model}")
-
-    FINAL_Xb, FINAL_Xf, FINAL_y, FINAL_g = Xb_final, Xf_final, y_final, g_final
-    FINAL_FEATURE_SET = f"{FINAL_GROUPS_S1} ({Xf_final.shape[1]}-dim)"
-
-
-    print("\n"+"="*70); print("PART 3: PER-CLASS PERFORMANCE (final config)"); print("="*70)
-
-    all_true, all_pred = get_loso_predictions(best_model, FINAL_Xb, FINAL_Xf, FINAL_y, FINAL_g, LABELS_S1)
-
-    print(f"\nClassification Report ({best_model}, feature set: {FINAL_FEATURE_SET}):")
+    print("\n" + "=" * 70)
+    print("STAGE 1 — PART 3: PER-CLASS PERFORMANCE (final config)")
+    print("=" * 70)
+    all_true, all_pred = get_loso_predictions(best_model, Xb, Xf, y, g, LABELS_S1, epochs=200, hidden=8)
+    print(f"\nClassification Report ({best_model}, features: {result['final_groups']}):")
     print(classification_report(all_true, all_pred, target_names=LABELS_S1))
-
     cm = confusion_matrix(all_true, all_pred, labels=LABELS_S1)
-    print("Confusion Matrix:")
     print(pd.DataFrame(cm, index=LABELS_S1, columns=LABELS_S1))
 
-
-    print("\n"+"="*70); print("PART 4: VISUALIZATION"); print("="*70)
-
-    plot_confusion_matrix(cm, best_model, FINAL_FEATURE_SET)
-    plot_feature_distributions(best_model, FINAL_Xf, FINAL_y, FINAL_FEATURE_NAMES)
-    plot_energy_profiles(FINAL_Xb, FINAL_y)
-    plot_binned_boxplots(FINAL_Xb, FINAL_y)
-
-
-    print("\n"+"="*70); print("PART 5: EDGE ANALYSIS"); print("="*70)
-    print(f"\n  Measuring {best_model} ({FINAL_FEATURE_SET})...")
+    print("\n" + "=" * 70)
+    print("STAGE 1 — PART 4: VISUALIZATION")
+    print("=" * 70)
+    fig, ax = plt.subplots(figsize=(6, 5))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=LABELS_S1, yticklabels=LABELS_S1,
+                ax=ax, cbar=False, linewidths=0.5, linecolor='white')
+    ax.set_xlabel('Predicted'); ax.set_ylabel('True')
+    ax.set_title(f'Stage 1 Confusion Matrix — {best_model}')
+    plt.tight_layout()
+    plt.savefig(f'{RESULTS_DIR}/stage1_confusion_matrix.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {RESULTS_DIR}/stage1_confusion_matrix.png")
 
     if best_model in CLASSICAL_MODELS:
-        sc = StandardScaler().fit(FINAL_Xf)
-        clf = get_classical_models(0)[best_model]
-        clf.fit(sc.transform(FINAL_Xf), FINAL_y)
-        time_ms, time_std = measure_inference_time_classical(clf, sc.transform(FINAL_Xf))
-        size_mb = measure_model_size(clf, is_torch=False)
-    elif best_model == 'BiLSTM':
-        per_bin_dim = FINAL_Xb.shape[2]
-        l2i = {l:i for i,l in enumerate(LABELS_S1)}
-        y_idx = np.array([l2i[l] for l in FINAL_y])
-        sc = StandardScaler().fit(FINAL_Xb.reshape(-1, per_bin_dim))
-        Xb_s = sc.transform(FINAL_Xb.reshape(-1, per_bin_dim)).reshape(FINAL_Xb.shape)
-        model = train_bilstm(Xb_s, y_idx, len(LABELS_S1), per_bin_dim, 200, 8, 0)
-        time_ms, time_std = measure_inference_time_bilstm(model, Xb_s)
-        size_mb = measure_model_size(model, is_torch=True)
-    else:  # Fusion
-        per_bin_dim = FINAL_Xb.shape[2]; flat_dim = FINAL_Xf.shape[1]
-        l2i = {l:i for i,l in enumerate(LABELS_S1)}
-        y_idx = np.array([l2i[l] for l in FINAL_y])
-        scb = StandardScaler().fit(FINAL_Xb.reshape(-1, per_bin_dim))
-        scf = StandardScaler().fit(FINAL_Xf)
-        Xb_s = scb.transform(FINAL_Xb.reshape(-1, per_bin_dim)).reshape(FINAL_Xb.shape)
-        Xf_s = scf.transform(FINAL_Xf)
-        model = train_fusion(Xb_s, Xf_s, y_idx, len(LABELS_S1), per_bin_dim, flat_dim, 200, 0)
-        time_ms, time_std = measure_inference_time_fusion(model, Xb_s, Xf_s)
-        size_mb = measure_model_size(model, is_torch=True)
+        sc = StandardScaler().fit(Xf)
+        clf_full = get_classical_models(0, len(LABELS_S1))[best_model]
+        clf_full.fit(sc.transform(Xf), y)
+        result_imp = permutation_importance(clf_full, sc.transform(Xf), y,
+                                             n_repeats=30, random_state=42, scoring='accuracy')
+        imp_mean = result_imp.importances_mean
+        top_n = min(4, len(feature_names))
+        top_idx = np.argsort(imp_mean)[-top_n:][::-1]
+        top_features = [feature_names[i] for i in top_idx]
 
-    throughput = 100 / (time_ms / 1000) if time_ms > 0 else float('inf')
-    power = 50 if time_ms < 1 else 100 if time_ms < 5 else 400
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        axes = axes.flatten()
+        for i, (idx, feat) in enumerate(zip(top_idx, top_features)):
+            ax = axes[i]
+            for label in LABELS_S1:
+                mask = y == label
+                ax.hist(Xf[mask, idx], bins=30, alpha=0.5, label=label, density=True)
+            ax.set_xlabel(feat); ax.set_ylabel('Density'); ax.legend()
+            ax.set_title(f'Top {i+1} Feature: {feat}')
+        plt.suptitle(f'Stage 1 — Top Discriminative Features ({best_model})')
+        plt.tight_layout()
+        plt.savefig(f'{RESULTS_DIR}/stage1_feature_distributions.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"  Saved: {RESULTS_DIR}/stage1_feature_distributions.png")
+    else:
+        print(f"  Best model is {best_model} — skipping permutation-importance plot.")
 
-    print(f"    Inference Time: {time_ms:.3f} ± {time_std:.3f} ms")
-    print(f"    Model Size: {size_mb:.3f} MB")
-    print(f"    Throughput: {throughput:.1f} samples/sec")
-    print(f"    Estimated Power: {power:.1f} mW")
-    print(f"    Edge Suitability: {'Excellent' if time_ms < 5 and size_mb < 1 else 'Good' if time_ms < 20 else 'Poor'}")
+    print("\n" + "=" * 70)
+    print("STAGE 1 — PART 5: EDGE ANALYSIS")
+    print("=" * 70)
+    if best_model in CLASSICAL_MODELS:
+        sc = StandardScaler().fit(Xf)
+        clf = get_classical_models(0, len(LABELS_S1))[best_model]
+        clf.fit(sc.transform(Xf), y)
+        Xf_s = sc.transform(Xf)
+        for _ in range(50):
+            _ = clf.predict(Xf_s[:100])
+        times = []
+        for _ in range(200):
+            t0 = time.perf_counter()
+            _ = clf.predict(Xf_s[:100])
+            times.append((time.perf_counter() - t0) * 1000)
+        size_mb = len(pickle.dumps(clf)) / (1024 * 1024)
+    else:
+        import torch
+        l2i = {l: i for i, l in enumerate(LABELS_S1)}
+        y_idx = np.array([l2i[l] for l in y])
+        per_bin_dim = Xb.shape[2]
+        if best_model == 'BiLSTM':
+            sc = StandardScaler().fit(Xb.reshape(-1, per_bin_dim))
+            Xb_s = sc.transform(Xb.reshape(-1, per_bin_dim)).reshape(Xb.shape)
+            model = train_bilstm(Xb_s, y_idx, len(LABELS_S1), per_bin_dim, 200, 8, 0)
+            model.eval()
+            Xb_t = torch.tensor(Xb_s[:100], dtype=torch.float32).to(DEVICE)
+            for _ in range(50):
+                with torch.no_grad():
+                    _ = model(Xb_t)
+            times = []
+            for _ in range(200):
+                t0 = time.perf_counter()
+                with torch.no_grad():
+                    _ = model(Xb_t)
+                times.append((time.perf_counter() - t0) * 1000)
+            size_mb = sum(p.numel() for p in model.parameters()) * 4 * 2 / (1024 * 1024)
+        else:
+            flat_dim = Xf.shape[1]
+            scb = StandardScaler().fit(Xb.reshape(-1, per_bin_dim))
+            scf = StandardScaler().fit(Xf)
+            Xb_s = scb.transform(Xb.reshape(-1, per_bin_dim)).reshape(Xb.shape)
+            Xf_s = scf.transform(Xf)
+            model = train_fusion(Xb_s, Xf_s, y_idx, len(LABELS_S1), per_bin_dim, flat_dim, 200, 0)
+            model.eval()
+            Xb_t = torch.tensor(Xb_s[:100], dtype=torch.float32).to(DEVICE)
+            Xf_t = torch.tensor(Xf_s[:100], dtype=torch.float32).to(DEVICE)
+            for _ in range(50):
+                with torch.no_grad():
+                    _ = model(Xb_t, Xf_t)
+            times = []
+            for _ in range(200):
+                t0 = time.perf_counter()
+                with torch.no_grad():
+                    _ = model(Xb_t, Xf_t)
+                times.append((time.perf_counter() - t0) * 1000)
+            size_mb = sum(p.numel() for p in model.parameters()) * 4 * 2 / (1024 * 1024)
 
+    time_ms, time_std = np.mean(times), np.std(times)
+    print(f"    Inference: {time_ms:.3f} ± {time_std:.3f} ms   Size: {size_mb:.3f} MB")
 
     results = {
-        'model_selected_on_core': model_stage1,
-        'final_feature_groups': FINAL_GROUPS_S1,
+        'model_selected_on_core': result['model_selected_on_core'],
         'final_model': best_model,
-        'model_changed_after_feature_selection': best_model != model_stage1,
-        'feature_selection_log': selection_log,
-        'model_comparison_core': {k: [{'acc':m['accuracy'],'bal':m['balanced_accuracy'],'f1':m['macro_f1']} for m in v]
-                                   for k,v in model_results_core.items()},
-        'model_comparison_final_features': {k: [{'acc':m['accuracy'],'bal':m['balanced_accuracy'],'f1':m['macro_f1']} for m in v]
-                                             for k,v in model_results_final.items()},
+        'final_feature_groups': result['final_groups'],
+        'feature_selection_log': result['selection_log'],
         'confusion_matrix': cm.tolist(),
-        'edge_metrics': {'inference_time_ms': time_ms, 'model_size_mb': size_mb,
-                          'throughput_samples_sec': throughput, 'power_mw': power},
+        'edge_metrics': {'inference_time_ms': float(time_ms), 'model_size_mb': float(size_mb)},
     }
     with open(f'{RESULTS_DIR}/stage1_final_results.json', 'w') as f:
         json.dump(results, f, indent=2, default=str)
 
     print(f"\n{'='*70}")
-    print(f"STAGE 1 COMPLETE")
-    print(f"  Model selected on core set: {model_stage1}")
-    print(f"  Final feature groups (greedy, significance-gated): {FINAL_GROUPS_S1}")
-    print(f"  Final model (re-verified): {best_model}")
+    print("STAGE 1 COMPLETE")
+    print(f"  Final model: {best_model}")
+    print(f"  Final feature groups: {result['final_groups']}")
     print(f"{'='*70}")
 
 if __name__ == '__main__':
