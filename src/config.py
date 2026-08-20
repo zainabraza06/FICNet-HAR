@@ -1,37 +1,49 @@
 import os
 import torch
 
-# Device configuration
+# ── Device ────────────────────────────────────────────────────────────────────
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# Paths
-# Assuming the script runs from the project root (Mobiact_projecct)
+# ── Paths ─────────────────────────────────────────────────────────────────────
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_ROOT = os.path.join(PROJECT_ROOT, 'data', 'Annotated Data')
-RESULTS_DIR = os.path.join(PROJECT_ROOT, 'results', 'stage1_complete')
-RESULTS_DIR_S2A = os.path.join(PROJECT_ROOT, 'results', 'stage2a_complete')
-RESULTS_DIR_S2B = os.path.join(PROJECT_ROOT, 'results', 'stage2b_complete')
-RESULTS_DIR_HIERARCHICAL = os.path.join(PROJECT_ROOT, 'results', 'hierarchical_complete')
-RESULTS_DIR_STREAMING = os.path.join(PROJECT_ROOT, 'results', 'streaming_complete')
+DATA_ROOT    = os.path.join(PROJECT_ROOT, 'data', 'Annotated Data')
+RESULTS_ROOT = os.path.join(PROJECT_ROOT, 'results')
+os.makedirs(RESULTS_ROOT, exist_ok=True)
 
-# Ensure results directory exists
-os.makedirs(RESULTS_DIR, exist_ok=True)
-os.makedirs(RESULTS_DIR_S2A, exist_ok=True)
-os.makedirs(RESULTS_DIR_S2B, exist_ok=True)
-os.makedirs(RESULTS_DIR_HIERARCHICAL, exist_ok=True)
-os.makedirs(RESULTS_DIR_STREAMING, exist_ok=True)
-
-# Code and Classes
-FALL_CODES = ['BSC', 'FKL', 'FOL', 'SDL']
+# ── Activity codes ────────────────────────────────────────────────────────────
+FALL_CODES   = ['BSC', 'FKL', 'FOL', 'SDL']
 ADL_CODES_11 = ['STD', 'WAL', 'JOG', 'JUM', 'STU', 'STN', 'SCH', 'SIT', 'CHU', 'CSI', 'CSO']
-ALL_CODES = FALL_CODES + ADL_CODES_11
-LABELS_S1 = ['ADL', 'FALL']
-LABELS_S2A = sorted(FALL_CODES)
-LABELS_S2B = sorted(ADL_CODES_11)
-LABELS_ALL_15 = sorted(ALL_CODES)
+ALL_CODES    = FALL_CODES + ADL_CODES_11
 
-# Model and Feature Settings
-SEEDS = [0, 1, 2, 3, 4]
+# ── Task definitions ──────────────────────────────────────────────────────────
+TASK_CONFIG = {
+    'binary':    {
+        'codes':    ALL_CODES,
+        'labels':   ['ADL', 'FALL'],
+        'label_fn': lambda code: 'FALL' if code in FALL_CODES else 'ADL',
+    },
+    'adl_only':  {
+        'codes':    ADL_CODES_11,
+        'labels':   sorted(ADL_CODES_11),
+        'label_fn': lambda code: code,
+    },
+    'fall_only': {
+        'codes':    FALL_CODES,
+        'labels':   sorted(FALL_CODES),
+        'label_fn': lambda code: code,
+    },
+    'flat15':    {
+        'codes':    ALL_CODES,
+        'labels':   sorted(ALL_CODES),
+        'label_fn': lambda code: code,
+    },
+}
+
+TASKS_TO_RUN = ['binary', 'adl_only', 'fall_only', 'flat15']
+
+# ── Model / training settings ─────────────────────────────────────────────────
 CLASSICAL_MODELS = {'LDA', 'KNN-3', 'SVM-RBF'}
-MODELS = ['LDA', 'KNN-3', 'SVM-RBF', 'BiLSTM', 'Fusion']
-ALPHA = 0.05  # significance threshold for accepting a feature addition
+MODELS           = ['LDA', 'KNN-3', 'SVM-RBF', 'BiLSTM', 'Fusion']
+SEEDS            = [0, 1, 2, 3, 4]
+ALPHA            = 0.05
+EPOCHS           = 250
