@@ -1,162 +1,154 @@
 import os
 import json
+import time
 import warnings
 import numpy as np
 import pandas as pd
-from sklearn.metrics import (accuracy_score, balanced_accuracy_score,
-                              confusion_matrix, classification_report,
-                              precision_recall_fscore_support)
+from sklearn.metrics import (confusion_matrix, classification_report)
 
-from src.config import (TASK_CONFIG, TASKS_TO_RUN, MODELS, RESULTS_ROOT, EPOCHS, DEVICE)
-from src.features.extractors import CORE_GROUPS, CANDIDATE_GROUPS
-from src.data.loader import build_dataset
-from src.training.evaluate import (run_model_selection, select_best_model,
-                                   greedy_feature_selection, mean_ci)
-from src.utils.viz import plot_confusion_matrix
+from src.config import (TASK_CONFIG, MODES, SEEDS_CV, SEEDS_LOSO,
+                        RESULTS_DIR, EPOCHS, FIC_LOSS_WEIGHT,
+                        FIC_VAR_THRESH, FIC_CORR_THRESH, DEVICE,
+                        WIN_LEN, STEP, FS_TARGET, WINDOW_SEC, OVERLAP)
+from src.data.loader import build_raw_dataset
+from src.data.features import extract_handcrafted_features
+from src.training.evaluate import run_cv, run_loso, compute_metrics
+from src.utils.results import rewrite_summary_csv
 
 warnings.filterwarnings('ignore')
-print(f"Using device: {DEVICE}")
+print(f"Device: {DEVICE}")
+print(f"Window: {WIN_LEN} samples ({WINDOW_SEC}s @ {FS_TARGET}Hz), "
+      f"step {STEP} samples ({OVERLAP*100:.0f}% overlap)")
 
-
-def run_task(task_name):
-    """
-    Full pipeline for a single task:
-      1. Model selection on core feature set (5 seeds × LOSO)
-      2. Greedy, subject-level significance-gated feature selection
-      3. Final metrics + confusion matrix + JSON output
-
-    Returns a summary dict for the cross-task table.
-    """
-    print("\n" + "#" * 70)
-    print(f"# TASK: {task_name}")
-    print("#" * 70)
-
-    cfg            = TASK_CONFIG[task_name]
-    codes_for_task = cfg['codes']
-    labels         = cfg['labels']
-    label_fn       = cfg['label_fn']
-
-    results_dir = os.path.join(RESULTS_ROOT, f'task_{task_name}')
-    os.makedirs(results_dir, exist_ok=True)
-
-    # ── Part 1: model selection on core feature set ───────────────────────────
-    print(f"\n{'=' * 70}\nPART 1: MODEL SELECTION [{task_name}] — core set\n{'=' * 70}")
-    Xb_core, Xf_core, y_core, g_core = build_dataset(
-        CORE_GROUPS, codes_for_task, label_fn
-    )
-    print(f"Dataset: Xb={Xb_core.shape}, Xf={Xf_core.shape}, classes={labels}")
-
-    model_results_core = {}
-    for model in MODELS:
-        per_seed = run_model_selection(model, Xb_core, Xf_core, y_core, g_core,
-                                       labels, epochs=EPOCHS, hidden=16)
-        accs = [accuracy_score(t, p) for t, p, _ in per_seed]
-        stat = mean_ci(accs)
-        print(f"  {model}: acc={stat['mean']:.4f} ± {stat['sd']:.4f}  "
-              f"95% CI [{stat['ci95'][0]:.4f}, {stat['ci95'][1]:.4f}]")
-        model_results_core[model] = per_seed
-
-    model_stage = select_best_model(model_results_core)
-    print(f"\n  >>> Model selected: {model_stage}")
-
-    # ── Part 2: greedy feature selection ─────────────────────────────────────
-    print(f"\n{'=' * 70}\nPART 2: FEATURE SELECTION [{task_name}] on {model_stage}\n{'=' * 70}")
-    final_groups, final_per_seed, selection_log = greedy_feature_selection(
-        model_name       = model_stage,
-        current_groups   = list(CORE_GROUPS),
-        remaining        = list(CANDIDATE_GROUPS),
-        current_per_seed = model_results_core[model_stage],
-        codes_for_task   = codes_for_task,
-        label_fn         = label_fn,
-        labels           = labels,
-        build_dataset_fn = build_dataset,
-        epochs           = EPOCHS,
-        hidden           = 16,
-    )
-    print(f"\n  >>> FINAL FEATURE SET [{task_name}]: {final_groups}")
-
-    # ── Part 3: final metrics + outputs ──────────────────────────────────────
-    print(f"\n{'=' * 70}\nPART 3: FINAL RESULTS [{task_name}]\n{'=' * 70}")
-    pooled_accs = [accuracy_score(t, p)            for t, p, _ in final_per_seed]
-    pooled_bal  = [balanced_accuracy_score(t, p)   for t, p, _ in final_per_seed]
-    pooled_f1   = [
-        precision_recall_fscore_support(t, p, labels=labels, average='macro',
-                                        zero_division=0)[2]
-        for t, p, _ in final_per_seed
-    ]
-    acc_stat = mean_ci(pooled_accs)
-    bal_stat = mean_ci(pooled_bal)
-    f1_stat  = mean_ci(pooled_f1)
-
-    print(f"  Accuracy:     {acc_stat['mean']:.4f} ± {acc_stat['sd']:.4f}  "
-          f"95% CI {acc_stat['ci95']}")
-    print(f"  Balanced Acc: {bal_stat['mean']:.4f} ± {bal_stat['sd']:.4f}")
-    print(f"  Macro F1:     {f1_stat['mean']:.4f} ± {f1_stat['sd']:.4f}")
-
-    all_true, all_pred, _ = final_per_seed[0]
-    print(f"\nClassification Report (seed 0, {model_stage}, features={final_groups}):")
-    print(classification_report(all_true, all_pred, target_names=labels, digits=4))
-
-    cm = confusion_matrix(all_true, all_pred, labels=labels)
-    pd.DataFrame(cm, index=labels, columns=labels).to_csv(
-        os.path.join(results_dir, f'{task_name}_confusion_matrix.csv')
-    )
-    plot_confusion_matrix(cm, labels, task_name, model_stage, results_dir)
-
-    results = {
-        'task':              task_name,
-        'labels':            labels,
-        'final_model':       model_stage,
-        'final_groups':      final_groups,
-        'selection_log':     selection_log,
-        'accuracy':          acc_stat,
-        'balanced_accuracy': bal_stat,
-        'macro_f1':          f1_stat,
-        'confusion_matrix':  cm.tolist(),
-    }
-    with open(os.path.join(results_dir, f'{task_name}_results.json'), 'w') as f:
-        json.dump(results, f, indent=2, default=str)
-
-    print(f"\n{task_name} COMPLETE — model={model_stage}, "
-          f"features={final_groups}, acc={acc_stat['mean']:.4f}")
-
-    return {
-        'task':              task_name,
-        'model':             model_stage,
-        'features':          final_groups,
-        'accuracy':          acc_stat,
-        'balanced_accuracy': bal_stat,
-        'macro_f1':          f1_stat,
-    }
-
-
-# ── Main loop ─────────────────────────────────────────────────────────────────
 
 def main():
-    all_task_results = []
-    for task_name in TASKS_TO_RUN:
-        result = run_task(task_name)
-        all_task_results.append(result)
+    all_results = []
 
-    print("\n" + "#" * 70)
-    print("# SUMMARY — ALL TASKS")
-    print("#" * 70)
-    rows = []
-    for r in all_task_results:
-        rows.append({
-            'Task':         r['task'],
-            'Model':        r['model'],
-            'Features':     '+'.join(r['features']),
-            'Accuracy':     f"{r['accuracy']['mean']:.4f} ± {r['accuracy']['sd']:.4f}",
-            'Balanced Acc': f"{r['balanced_accuracy']['mean']:.4f}",
-            'Macro F1':     f"{r['macro_f1']['mean']:.4f}",
-        })
-    summary_df = pd.DataFrame(rows)
+    for task_name, cfg in TASK_CONFIG.items():
+        print("\n" + "=" * 70)
+        print(f"TASK: {task_name}")
+        print("=" * 70)
+
+        X, y, subj = build_raw_dataset(cfg['codes'], cfg['label_fn'])
+        labels = sorted(np.unique(y).tolist())
+        print(f"Windows: {X.shape}, classes: {labels}, "
+              f"subjects: {len(np.unique(subj))}")
+
+        # Handcrafted features computed once, raw (unscaled).
+        # Scaling + selection happen per-fold on training data only.
+        feat_raw = extract_handcrafted_features(X)
+        print(f"Handcrafted features: {feat_raw.shape}")
+
+        task_dir = os.path.join(RESULTS_DIR, task_name)
+        os.makedirs(task_dir, exist_ok=True)
+
+        for mode in MODES:
+            for protocol in ('cv', 'loso'):
+                result_path  = os.path.join(task_dir, f'{mode}_{protocol}.json')
+                partial_path = os.path.join(task_dir, f'{mode}_{protocol}_PARTIAL.json')
+
+                # ── RESUME SUPPORT ────────────────────────────────────────────
+                if os.path.exists(result_path):
+                    print(f"\n--- {task_name} | {mode} | {protocol} --- "
+                          f"ALREADY DONE, skipping "
+                          f"(delete {result_path} to redo)", flush=True)
+                    with open(result_path) as f:
+                        all_results.append(json.load(f))
+                    rewrite_summary_csv(all_results, RESULTS_DIR)
+                    continue
+
+                print(f"\n--- {task_name} | mode={mode} | protocol={protocol} ---",
+                      flush=True)
+                seeds = SEEDS_CV if protocol == 'cv' else SEEDS_LOSO
+                print(f"  seeds: {seeds}", flush=True)
+
+                seed_metrics = []
+                last_true, last_pred = [], []
+
+                for seed in seeds:
+                    t0 = time.time()
+
+                    if protocol == 'cv':
+                        t_true, t_pred = run_cv(
+                            mode, X, y, subj, feat_raw, labels, epochs=EPOCHS, seed=seed
+                        )
+                        fold_info = None
+                    else:
+                        t_true, t_pred, fold_info = run_loso(
+                            mode, X, y, subj, feat_raw, labels, epochs=EPOCHS, seed=seed
+                        )
+
+                    acc, bal_acc, f1 = compute_metrics(t_true, t_pred, labels)
+                    elapsed = time.time() - t0
+                    seed_metrics.append({
+                        'seed': seed, 'accuracy': acc,
+                        'balanced_accuracy': bal_acc, 'macro_f1': f1,
+                        'runtime_sec': elapsed,
+                    })
+                    last_true, last_pred = t_true, t_pred
+                    print(f"  seed {seed}: acc={acc:.4f}  bal_acc={bal_acc:.4f}  "
+                          f"macro_f1={f1:.4f}  ({elapsed:.0f}s)", flush=True)
+
+                    # Per-seed checkpoint
+                    with open(partial_path, 'w') as f:
+                        json.dump({
+                            'task': task_name, 'mode': mode, 'protocol': protocol,
+                            'seeds_completed': [m['seed'] for m in seed_metrics],
+                            'seeds_target': seeds,
+                            'per_seed_so_far': seed_metrics,
+                            'last_true': list(map(str, t_true)),
+                            'last_pred': list(map(str, t_pred)),
+                        }, f, indent=2, default=str)
+
+                accs     = [m['accuracy']          for m in seed_metrics]
+                bal_accs = [m['balanced_accuracy']  for m in seed_metrics]
+                f1s      = [m['macro_f1']           for m in seed_metrics]
+                cm       = confusion_matrix(last_true, last_pred, labels=labels)
+                report   = classification_report(
+                    last_true, last_pred, labels=labels,
+                    output_dict=True, zero_division=0,
+                )
+
+                result = {
+                    'task':     task_name,
+                    'mode':     mode,
+                    'protocol': protocol,
+                    'labels':   labels,
+                    'accuracy_mean':          float(np.mean(accs)),
+                    'accuracy_sd':            float(np.std(accs)),
+                    'balanced_accuracy_mean': float(np.mean(bal_accs)),
+                    'balanced_accuracy_sd':   float(np.std(bal_accs)),
+                    'macro_f1_mean':          float(np.mean(f1s)),
+                    'macro_f1_sd':            float(np.std(f1s)),
+                    'per_seed':               seed_metrics,
+                    'confusion_matrix_last_seed':       cm.tolist(),
+                    'classification_report_last_seed':  report,
+                }
+                if mode in ('fic', 'sam_fic'):
+                    result['fic_config'] = {
+                        'fic_loss_weight': FIC_LOSS_WEIGHT,
+                        'var_thresh':      FIC_VAR_THRESH,
+                        'corr_thresh':     FIC_CORR_THRESH,
+                        'optimizer':       'SAM' if mode == 'sam_fic' else 'Adam',
+                    }
+
+                all_results.append(result)
+                with open(result_path, 'w') as f:
+                    json.dump(result, f, indent=2, default=str)
+                if os.path.exists(partial_path):
+                    os.remove(partial_path)
+                print(f"  Saved: {result_path}", flush=True)
+
+                rewrite_summary_csv(all_results, RESULTS_DIR)
+
+    # ── Final printout ────────────────────────────────────────────────────────
+    summary_path = os.path.join(RESULTS_DIR, 'SUMMARY_all_tasks_modes_protocols.csv')
+    summary_df   = pd.read_csv(summary_path)
+    print("\n" + "=" * 70)
+    print("FULL SUMMARY")
+    print("=" * 70)
     print(summary_df.to_string(index=False))
-
-    summary_path = os.path.join(RESULTS_ROOT, 'all_tasks_summary.csv')
-    summary_df.to_csv(summary_path, index=False)
-    print(f"\nSaved summary: {summary_path}")
+    print(f"\nAll results saved to: {RESULTS_DIR}")
 
 
 if __name__ == '__main__':
