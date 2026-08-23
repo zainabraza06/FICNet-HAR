@@ -1,60 +1,90 @@
 import os
 import numpy as np
 import pandas as pd
-from src.config import DATA_ROOT
-from src.features.extractors import build_binned_features, build_flat_features
+from src.config import (DATA_ROOT, FS_NATIVE, FS_TARGET, CHANNELS,
+                        WIN_LEN, STEP, MIN_LEN)
 
 
-def load_file(code, subj, trial=1):
-    path = os.path.join(DATA_ROOT, code, f"{code}_{subj}_{trial}_annotated.csv")
-    return pd.read_csv(path) if os.path.exists(path) else None
-
-
-def get_segment(code, subj, trial=1):
-    df = load_file(code, subj, trial)
-    if df is None:
+def load_and_segment(fpath, code):
+    """Read one annotated CSV and return only the rows labelled with `code`."""
+    df = pd.read_csv(fpath)
+    if 'label' not in df.columns:
         return None
     seg = df[df['label'] == code].reset_index(drop=True)
     return seg if len(seg) > 0 else None
 
 
-def build_dataset(groups, codes_for_task, label_fn):
+def resample_segment(seg_df, native_fs=FS_NATIVE, target_fs=FS_TARGET, cols=CHANNELS):
     """
-    Generic dataset builder used by all four tasks.
+    Duration-preserving linear interpolation from native_fs to target_fs.
 
-    Parameters
-    ----------
-    groups         : list[str]  — feature groups to include (must be keys of REGISTRY)
-    codes_for_task : list[str]  — activity codes for this task
-    label_fn       : callable   — maps an activity code to its class label string
+    Returns an (n_target, len(cols)) float32 array.
+    Missing columns are filled with zeros.
+    """
+    n = len(seg_df)
+    duration_sec = n / native_fs
+    n_target = max(1, int(round(duration_sec * target_fs)))
+    t_native = np.linspace(0, duration_sec, n,        endpoint=False)
+    t_target = np.linspace(0, duration_sec, n_target, endpoint=False)
+    out = np.zeros((n_target, len(cols)), dtype=np.float32)
+    for i, c in enumerate(cols):
+        if c in seg_df.columns:
+            out[:, i] = np.interp(t_target, t_native, seg_df[c].values)
+    return out
+
+
+def make_windows(signal_arr):
+    """
+    Slide a fixed-length window over a resampled signal array.
+
+    Skips segments shorter than MIN_LEN. Returns a list of
+    (WIN_LEN, n_channels) float32 arrays.
+    """
+    n = len(signal_arr)
+    if n < MIN_LEN:
+        return []
+    windows = []
+    start = 0
+    while start + WIN_LEN <= n:
+        windows.append(signal_arr[start:start + WIN_LEN])
+        start += STEP
+    return windows
+
+
+def build_raw_dataset(codes, label_fn):
+    """
+    Scans DATA_ROOT for every `*_annotated.csv` matching the given codes,
+    resamples to FS_TARGET, windows with WIN_LEN / STEP / MIN_LEN, and
+    returns three parallel arrays.
 
     Returns
     -------
-    Xb : (N, n_bins, per_bin_dim)  binned tensor for BiLSTM / Fusion
-    Xf : (N, flat_dim)             flat feature vector for classical / Fusion MLP
-    y  : (N,)                      string labels
-    g  : (N,)                      subject IDs (for LOSO split)
+    X    : (N, WIN_LEN, 6)  float32  — raw 6-channel windows
+    y    : (N,)             str      — class labels produced by label_fn
+    subj : (N,)             int64    — subject IDs parsed from filenames
     """
-    include_gyro_bins = 'gyro' in groups
-    Xb, Xf, y, g = [], [], [], []
+    X, y, subj = [], [], []
 
-    for code in codes_for_task:
-        for subj in range(1, 68):
-            seg = get_segment(code, subj)
+    for code in codes:
+        code_dir = os.path.join(DATA_ROOT, code)
+        if not os.path.isdir(code_dir):
+            continue
+        for fname in sorted(os.listdir(code_dir)):
+            if not fname.endswith('_annotated.csv'):
+                continue
+            parts = fname.replace('_annotated.csv', '').split('_')
+            if len(parts) < 3:
+                continue
+            fcode, subject_id = parts[0], int(parts[1])
+            seg = load_and_segment(os.path.join(code_dir, fname), fcode)
             if seg is None:
                 continue
-            seg = seg.iloc[:1000]
-            acc  = seg[['acc_x', 'acc_y', 'acc_z']].values
-            gyro = seg[['gyro_x', 'gyro_y', 'gyro_z']].values if 'gyro_x' in seg.columns \
-                   else np.zeros((len(seg), 3))
-            roll = seg['roll'].values if 'roll' in seg.columns else np.zeros(len(seg))
+            resampled = resample_segment(seg)
+            for w in make_windows(resampled):
+                X.append(w)
+                y.append(label_fn(fcode))
+                subj.append(subject_id)
 
-            fb = build_binned_features(acc, gyro, n_bins=5, include_gyro=include_gyro_bins)
-            fc = build_flat_features(acc, gyro, roll, groups)
-            if fb is not None and fc is not None:
-                Xb.append(fb)
-                Xf.append(fc)
-                y.append(label_fn(code))
-                g.append(subj)
-
-    return np.array(Xb), np.array(Xf), np.array(y), np.array(g)
+    return (np.array(X, dtype=np.float32),
+            np.array(y),
+            np.array(subj, dtype=np.int64))
