@@ -1,98 +1,87 @@
-# FALL-HAR: A Lightweight Hierarchical System for Smartphone-Based Fall Detection and Activity Recognition
+# Revisiting Subject-Independent Evaluation for Smartphone-Based Fall and Activity Recognition
 
-![FALL-HAR Architecture](architectural_diagram_fall_har.png)
+This repository contains the official code for the paper:  
+**Revisiting Subject-Independent Evaluation for Smartphone-Based Fall and Activity Recognition: A Lightweight Benchmark on MobiAct**  
+*Zainab Raza Malik and Muhammad Zeeshan Abbas*
 
 ## Overview
 
-**FALL-HAR** is a lightweight hierarchical framework designed for smartphone-based human activity recognition (HAR), specifically focusing on the critical task of fall detection. Unlike traditional flat classification models that treat fall detection as just another activity class, FALL-HAR isolates fall detection into its own stage. This asymmetry is driven by the fact that missed falls have far greater consequences than misclassified activities of daily living (ADLs), and falls exhibit substantially greater cross-subject signal consistency.
+Human activity recognition (HAR) models evaluated using random cross-validation (CV) can produce optimistic performance estimates due to subject-mixed data partitions. This project systematically quantifies the CV-to-leave-one-subject-out (LOSO) generalization gap on the MobiAct dataset across four task formulations:
+- Binary (Fall vs. ADL)
+- Fall-type classification (4 classes)
+- ADL-only classification (11 classes)
+- Full activity recognition (15 classes)
 
-By decomposing the problem, FALL-HAR allows the critical fall detection stage to be optimized and evaluated independently from finer-grained activity discrimination. 
+To reduce this cross-subject performance loss, we introduce **Feature-Invariance-Conditioned (FIC) pooling** paired with **Sharpness-Aware Minimization (SAM)**. The combination provides physically guided temporal representation learning and optimization-level regularization within a lightweight model (81.5k parameters), effectively reducing the generalization gap.
 
-### Key Contributions
-1. **Hierarchical Fall-ADL Framework**: Separates binary fall detection (Stage 1) from 4-class fall-subtype (Stage 2a) and 11-class ADL recognition (Stage 2b), optimizing features for each specific task.
-2. **Subject-Independent LOSO Evaluation**: Employs a rigorous Leave-One-Subject-Out (LOSO) cross-validation protocol to ensure true generalization to unseen individuals, avoiding data leakage common in random k-fold splits.
-3. **Continuous Streaming Evaluation**: Assesses the system on continuous sliding-window streams to better reflect real-world, unsegmented activity, particularly at activity transitions.
-4. **Edge-Ready & Lightweight**: Achieves sub-1.5 ms inference latency and sub-0.1 MB model size, making it highly suitable for resource-constrained edge devices like smartphones.
+## Dataset Availability
 
----
+Due to data usage agreements, the MobiAct dataset cannot be redistributed in this repository. You must acquire it directly from the original authors.
 
-## Architecture Flow
+1. Request access to MobiAct v2.0 from the Hellenic Mediterranean University (Biomedical Informatics and eHealth Laboratory): [MobiAct Dataset](https://bmi.hmu.gr/the-mobifall-and-mobiact-datasets-2/)
+2. Once downloaded, extract the dataset and locate the `Annotated Data` folder.
+3. Place the `Annotated Data` folder inside the `data/` directory of this repository so the structure looks like:
+   ```
+   data/
+   └── Annotated Data/
+       ├── BSC/
+       ├── CHU/
+       ├── CSI/
+       ...
+   ```
 
-The system is structured as a three-stage hierarchy:
+## Dependencies
 
-1. **Stage 1 (Binary FALL/ADL Detection)**:
-   - **Goal**: Safety-critical isolation of falls from ADLs.
-   - **Model**: SVM-RBF.
-   - **Features**: Profile, kinematic statistics, and Relative-Position Encoding (RPE).
-   - **Performance**: 98.93% LOSO Accuracy.
+- Python 3.8+
+- PyTorch (>= 1.10)
+- NumPy
+- Pandas
+- scikit-learn
 
-2. **Stage 2a (Fall Subtype Classification)**:
-   - **Goal**: Classifies falls into 4 types (BSC, FKL, FOL, SDL).
-   - **Model**: Dual-branch Fusion Network.
-   - **Features**: Profile, kinematic statistics, and fall-specific kinematics.
-   - **Performance**: 85.86% LOSO Accuracy.
+You can install the required packages using pip:
+```bash
+pip install torch numpy pandas scikit-learn
+```
 
-3. **Stage 2b (ADL Subtype Recognition)**:
-   - **Goal**: Classifies ADLs into 11 categories (STD, WAL, JOG, etc.).
-   - **Model**: Dual-branch Fusion Network.
-   - **Features**: Profile, statistics, RPE, and gyroscope-derived statistics.
-   - **Performance**: 93.87% LOSO Accuracy.
+## Running the Evaluation
 
----
+The entire evaluation pipeline (preprocessing, model training across all four modes, and CV/LOSO evaluation) is managed by `src/main.py`.
 
-## Dataset and Methodology
+```bash
+python src/main.py
+```
 
-### Dataset
-This project uses the **MobiAct v2.0 dataset**, containing smartphone accelerometer, gyroscope, and orientation data from 67 participants. Data was collected via a Samsung Galaxy S3 carried in a trouser pocket at ~87 Hz. 
-The label space covers:
-- **4 Fall Types**: BSC, FKL, FOL, SDL
-- **11 ADLs**: STD, WAL, JOG, JUM, STU, STN, SCH, SIT, CHU, CSI, CSO
+The script will:
+1. Load and resample raw sensor data (200Hz to 50Hz).
+2. Segment signals into 1.0s windows with 50% overlap.
+3. Train and evaluate four configurations (`ERM`, `SAM`, `FIC`, `SAM+FIC`) on both CV and LOSO protocols.
+4. Output results iteratively to `results/01_primary_eval/`.
 
-### Models Evaluated
-- **Classical Models**: LDA, KNN-3, SVM-RBF
-- **Sequential Neural**: Bidirectional LSTM (BiLSTM)
-- **Dual-Branch Fusion**: Combines a BiLSTM over binned temporal data with a Multilayer Perceptron (MLP) over flat features, fused via per-channel gated cross-attention.
+**Resume Support:** If the run is interrupted, the script will skip completed configurations and resume from the last saved checkpoint automatically.
 
-### Feature Extraction
-The framework uses a greedy, significance-gated feature selection process to determine the optimal representation for each specific stage. Features include:
-- Binned representations & kinematic statistics
-- Fall-specific kinematics (e.g., impact peaks, settling time)
-- Temporal-attention entropy
-- Relative-Position Encoding (RPE)
-- Gyroscope & Spectral statistics
+## Code Structure
 
----
+- `src/config.py`: Global hyperparameter configuration, modes, and task definitions.
+- `src/data/loader.py`: Raw signal resampling, windowing, and dataset construction.
+- `src/data/features.py`: Handcrafted physical features for FIC (jerk, tilt, spectral, etc.).
+- `src/models/cnn.py`: `LightCNN` (ERM/SAM backbone) and `FICNet` (FIC pooling backbone).
+- `src/models/sam.py`: Sharpness-Aware Minimization optimizer wrapper.
+- `src/training/train.py`: Training loop encompassing CE and FIC consistency losses.
+- `src/training/evaluate.py`: Stratified CV and pooled LOSO evaluation protocols.
+- `src/main.py`: Main entry point orchestrating tasks, modes, protocols, and checkpointing.
 
-## Key Results
+## Citation
 
-All evaluations strictly use **Leave-One-Subject-Out (LOSO) cross-validation**.
+If you use this codebase or find our work helpful, please cite our paper:
 
-### 1. Stage-by-Stage Performance (Isolated)
-| Stage | Task | Selected Model | Best Features | Accuracy (LOSO) | F1 Score |
-|-------|------|----------------|---------------|-----------------|----------|
-| **1** | Fall vs. ADL | SVM-RBF | Profile + Stats + RPE | **98.93%** | 98.68% |
-| **2a** | 4-class Fall | Fusion | Profile + Stats + Fall-specific | **85.86%** | 85.83% |
-| **2b** | 11-class ADL | Fusion | Profile + Stats + RPE + Gyro | **93.87%** | 93.68% |
+```bibtex
+@article{malik2026revisiting,
+  title={Revisiting Subject-Independent Evaluation for Smartphone-Based Fall and Activity Recognition: A Lightweight Benchmark on MobiAct},
+  author={Malik, Zainab Raza and Abbas, Muhammad Zeeshan},
+  year={2026}
+}
+```
 
-### 2. End-to-End Hierarchical Performance
-When evaluated continuously with prediction-based routing (Stage 1 controls routing to Stage 2a/2b):
-- **End-to-End Accuracy**: **90.50% ± 0.58%**
-- **Balanced Accuracy**: 90.42% ± 0.46%
-- *Error Analysis*: Only ~10% of total pipeline errors were due to misrouting at Stage 1. The vast majority of residual error lies in the lower-stakes subtype discrimination, validating the hierarchical isolation of the safety-critical fall detector.
+## License
 
-### 3. Continuous Streaming Evaluation
-Testing on unsegmented, continuous data (200-sample sliding windows, 50% overlap):
-- **Classical Baseline (RF)**: 73.55% overall (40.75% at transitions)
-- **Fusion Baseline**: 92.25% overall (71.58% at transitions)
-- **Fusion + RPE**: **93.04% overall**
-*The sequential Fusion architecture dramatically outperforms memory-free classical approaches, particularly during complex activity transitions.*
-
-### 4. Computational Footprint
-The models are highly optimized for edge deployment:
-- **Inference Latency**: < 1.5 ms per window
-- **Model Storage**: < 0.1 MB per stage
-
----
-
-## Conclusion
-FALL-HAR demonstrates that decoupling fall detection from general activity recognition yields a highly reliable, safety-first pipeline. By applying task-specific feature selection and rigorous subject-independent LOSO validation, the system achieves near-state-of-the-art binary fall detection while maintaining strong multi-class ADL recognition and excellent edge-device efficiency.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
