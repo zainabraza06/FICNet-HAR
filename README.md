@@ -1,9 +1,9 @@
 # Revisiting Subject-Independent Evaluation for Smartphone-Based Fall and Activity Recognition
 
-This repository contains the official code for the submitted manuscript:  
+This repository contains the official code for the upcoming paper:  
 **Revisiting Subject-Independent Evaluation for Smartphone-Based Fall and Activity Recognition: A Lightweight Benchmark on MobiAct**  
 *Zainab Raza Malik and Muhammad Zeeshan Abbas*  
-*(Currently under review)*
+*(Manuscript in preparation)*
 
 ## Overview
 
@@ -73,14 +73,14 @@ The script will:
 
 ## Citation
 
-This paper is currently under review. If you use this codebase or find our work helpful, please use the following temporary citation (which will be updated upon publication):
+This paper is currently in preparation. If you use this codebase or find our work helpful, please use the following temporary citation (which will be updated upon publication):
 
 ```bibtex
 @misc{malik2026revisiting,
   title={Revisiting Subject-Independent Evaluation for Smartphone-Based Fall and Activity Recognition: A Lightweight Benchmark on MobiAct},
   author={Malik, Zainab Raza and Abbas, Muhammad Zeeshan},
   year={2026},
-  note={Under review}
+  note={In preparation}
 }
 ```
 
