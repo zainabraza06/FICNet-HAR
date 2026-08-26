@@ -3,7 +3,8 @@
 This repository contains the code and benchmark for our research:  
 **Revisiting Subject-Independent Evaluation for Smartphone-Based Fall and Activity Recognition: A Lightweight Benchmark on MobiAct**  
 *Zainab Raza Malik and Muhammad Zeeshan Abbas*  
-*(Manuscript in preparation)*
+*(School of Electrical Engineering and Computer Science (SEECS), NUST, Islamabad, Pakistan)*  
+*(Submitted Manuscript)*
 
 ## Overview
 
